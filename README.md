@@ -26,8 +26,10 @@ tests/               Vitest security suite (engine); backend/tests (API)
 
 ```bash
 npm install && npm run dev        # interactive product demo (simulated cloud)
-npm run build                     # static production bundle
+npm run build                     # static production bundle (dist/)
 ```
+
+Hosting on Hostinger (shared = console, VPS = full stack): `docs/HOSTINGER.md`.
 
 ## Run the full stack (local)
 
