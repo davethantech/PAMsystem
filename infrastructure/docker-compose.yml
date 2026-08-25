@@ -44,6 +44,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     networks: [api, vault]                 # api-facing, vault-reachable
+    ports: ["127.0.0.1:8081:8080"]         # loopback only — for smoke.mjs / local debugging
     restart: unless-stopped
 
   connector-gateway:

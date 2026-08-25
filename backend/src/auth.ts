@@ -172,7 +172,8 @@ export async function oidcCallback(tenantSlug: string, provider: string, params:
   const email = claims.email as string;
   // Tenant is DERIVED from the verified IdP assertion (email-domain mapping),
   // never from client-supplied parameters.
-  const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1 AND tenant_id = $2 AND status='ACTIVE'`, [email, tenantId]);
+  const { rows } = await withTenant(tenantId, (c) =>
+    c.query(`SELECT * FROM users WHERE email = $1 AND tenant_id = $2 AND status='ACTIVE'`, [email, tenantId]));
   if (!rows.length) {
     await audit({ tenantId, actorName: email, type: 'ACCESS_DENIED', result: 'DENIED', meta: 'SSO user not provisioned', sourceIp: ip });
     throw new HttpError(403, 'NOT_PROVISIONED', 'User not provisioned in this tenant');

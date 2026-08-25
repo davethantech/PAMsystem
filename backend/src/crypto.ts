@@ -12,7 +12,7 @@
  */
 import crypto from 'node:crypto';
 import { KMSClient, EncryptCommand, DecryptCommand, GenerateDataKeyCommand } from '@aws-sdk/client-kms';
-import { cfg, pool } from './db.js';
+import { cfg, pool, withTenant } from './db.js';
 
 const kms = cfg.kmsProvider === 'aws' ? new KMSClient({}) : null;
 

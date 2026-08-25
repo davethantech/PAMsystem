@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "migrate": "node dist/db.js --migrate",
+    "seed": "node dist/seed.js",
+    "seed:dev": "tsx src/seed.ts",
     "test": "vitest run"
   },
   "dependencies": {
