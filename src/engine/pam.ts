@@ -192,18 +192,24 @@ function has(perm: string): boolean {
 function credVisible(c: CredMeta): boolean {
   if (!session) return false;
   if (['SUPER_ADMIN', 'ORG_ADMIN', 'PAM_ADMIN', 'SECURITY_ADMIN', 'AUDITOR'].includes(session.role)) return true;
-  return c.collectionIds.some((id) => session!.collectionIds.includes(id));
+  // an approved JIT window temporarily grants visibility to its grantee
+  return c.collectionIds.some((id) => session!.collectionIds.includes(id)) || hasLiveApproval(c);
 }
 
 function inCollection(c: CredMeta): boolean {
   if (!session) return false;
   if (['SUPER_ADMIN', 'ORG_ADMIN', 'PAM_ADMIN'].includes(session.role)) return true;
-  return c.collectionIds.some((id) => session!.collectionIds.includes(id));
+  return c.collectionIds.some((id) => session!.collectionIds.includes(id)) || hasLiveApproval(c);
+}
+
+function hasLiveApproval(c: CredMeta): boolean {
+  if (!session) return false;
+  return requests.some((r) => r.credentialId === c.id && r.userId === session!.id && r.status === 'APPROVED' && (r.expiresAt ?? 0) > now());
 }
 
 function jitAllowed(c: CredMeta): boolean {
   if (c.access !== 'APPROVAL_REQUIRED') return true;
-  return requests.some((r) => r.credentialId === c.id && r.userId === session!.id && r.status === 'APPROVED' && (r.expiresAt ?? 0) > now());
+  return hasLiveApproval(c);
 }
 
 /* ---------------- historical audit seed ---------------- */
@@ -323,10 +329,11 @@ export const pam = {
       throw pamErr('JIT_REQUIRED', 'This account requires an approved just-in-time window. Request access first.', ev.id);
     }
     const app = APPS.find((a) => a.credentialId === cred.id)!;
+    const t = now();
     const grant: GrantMeta & { userId: string; tenantId: string } = {
       grantId: uid('grt'), tokenTail: rnd(4),
       credentialId: cred.id, credentialName: cred.name, appId: app.id, appName: app.name, domain: app.domain,
-      issuedAt: now(), expiresAt: now() + 30_000, consumed: false,
+      issuedAt: t, expiresAt: t + 30_000, consumed: false,
       userId: actor.id, tenantId: actor.tenantId,
     };
     grants.set(grant.grantId, grant);

@@ -1,0 +1,35 @@
+{
+  "name": "keyrail-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Keyrail Cloud PAM control plane — multi-tenant, zero-plaintext-path API",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "migrate": "node dist/db.js --migrate",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-kms": "^3.600.0",
+    "@fastify/cookie": "^9.3.1",
+    "@fastify/rate-limit": "^9.1.0",
+    "@simplewebauthn/server": "^10.0.0",
+    "argon2": "^0.40.1",
+    "fastify": "^4.28.0",
+    "ioredis": "^5.4.1",
+    "jose": "^5.4.0",
+    "openid-client": "^5.6.5",
+    "pg": "^8.12.0",
+    "pino": "^9.2.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.15.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  }
+}

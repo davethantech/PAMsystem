@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root { color-scheme: dark; }
+      body { width: 300px; margin: 0; background: #0d1830; color: #e9f1fc; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+      header { padding: 12px 14px; border-bottom: 1px solid rgba(94,130,180,.2); display: flex; gap: 8px; align-items: center; }
+      header b { letter-spacing: .08em; font-size: 13px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #3ad6b5; box-shadow: 0 0 8px #3ad6b5; }
+      main { padding: 14px; }
+      .row { font-size: 12px; color: #8ba1c0; display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed rgba(94,130,180,.15); }
+      .row b { color: #e9f1fc; font-family: ui-monospace, monospace; font-weight: 500; }
+      button { margin-top: 12px; width: 100%; padding: 9px; border: 0; border-radius: 8px; background: #3ad6b5; color: #062019; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: .4; cursor: not-allowed; }
+      #msg { margin-top: 10px; font-size: 11.5px; color: #ff9d94; min-height: 16px; }
+      .fine { margin-top: 8px; font-size: 10px; color: #5c7396; }
+    </style>
+  </head>
+  <body>
+    <header><span class="dot"></span><b>KEYRAIL CONNECTOR</b></header>
+    <main>
+      <div class="row"><span>Grant bound to</span><b id="domain">—</b></div>
+      <div class="row"><span>Active tab</span><b id="tab">—</b></div>
+      <div class="row"><span>Expires in</span><b id="ttl">—</b></div>
+      <button id="launch">Inject & sign in</button>
+      <div id="msg"></div>
+      <p class="fine">Injection only runs when the tab's domain matches the grant's allowlist. The password is never shown, stored, or readable by the page.</p>
+    </main>
+    <script src="dist/popup.js"></script>
+  </body>
+</html>
