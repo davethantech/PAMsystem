@@ -8,6 +8,7 @@ import Access from './screens/Access';
 import { UsersPage, SecurityPage, SettingsPage } from './screens/Admin';
 import Reports from './screens/Reports';
 import Architecture from './screens/Architecture';
+import HowItWorks from './screens/HowItWorks';
 
 function Router() {
   const { phase, route } = usePam();
@@ -19,6 +20,7 @@ function Router() {
   return (
     <Shell>
       {route === 'dashboard' && <Dashboard />}
+      {route === 'how' && <HowItWorks />}
       {route === 'launcher' && <Launcher />}
       {route === 'vault' && <Vault />}
       {route === 'access' && <Access />}

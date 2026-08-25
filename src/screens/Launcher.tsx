@@ -487,7 +487,7 @@ export default function Launcher() {
               <li className="flex gap-2"><Dot tone="var(--amber)" /> <span><span className="text-[var(--ink)]">use ≠ reveal.</span> Launch rights and reveal rights are separate permissions; yours are launch-only.</span></li>
               <li className="flex gap-2"><Dot tone="var(--sky)" /> <span><span className="text-[var(--ink)]">Isolated-world injection.</span> Credentials are written to login fields opaquely, then zeroized.</span></li>
             </ul>
-            <button className="btn btn-ghost btn-sm mt-4 w-full" onClick={() => setRoute('security')}>Run adversarial tests <I n="arrowR" className="w-3.5 h-3.5" /></button>
+            <button className="btn btn-ghost btn-sm mt-4 w-full" onClick={() => setRoute('how')}>See the launch anatomy <I n="arrowR" className="w-3.5 h-3.5" /></button>
           </div>
         </div>
       </Reveal>

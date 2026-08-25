@@ -6,6 +6,7 @@ import { toastTone, usePam, type Route } from '../state/store';
 const NAV: { group: string; items: { route: Route; label: string; icon: string }[] }[] = [
   { group: 'Overview', items: [
     { route: 'dashboard', label: 'Dashboard', icon: 'grid' },
+    { route: 'how', label: 'How It Works', icon: 'bolt' },
     { route: 'launcher', label: 'Applications', icon: 'launch' },
     { route: 'architecture', label: 'Architecture', icon: 'layers' },
   ]},
@@ -25,6 +26,7 @@ const NAV: { group: string; items: { route: Route; label: string; icon: string }
 
 const TITLES: Record<Route, [string, string]> = {
   dashboard: ['Operations Dashboard', 'Tenant-scoped posture · live from the control plane'],
+  how: ['How It Works', 'Anatomy of a launch — eight hops, zero passwords'],
   launcher: ['Application Launcher', 'Zero-knowledge launch — the password never leaves the vault'],
   vault: ['Credential Vault', 'Metadata only — no plaintext channel exists in this API'],
   access: ['Access Control', 'Requests · approvals · just-in-time windows · live sessions'],

@@ -4,7 +4,7 @@ import type { SessionRec, SessionUser, Snapshot } from '../engine/types';
 
 export type Phase = 'login' | 'mfa' | 'console';
 export type Route =
-  | 'dashboard' | 'launcher' | 'vault' | 'access' | 'users'
+  | 'dashboard' | 'how' | 'launcher' | 'vault' | 'access' | 'users'
   | 'security' | 'reports' | 'architecture' | 'settings';
 
 export interface Toast { id: number; msg: string; tone: 'teal' | 'red' | 'amber' | 'sky' }
