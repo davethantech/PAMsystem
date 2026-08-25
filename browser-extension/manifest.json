@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Keyrail Secure Connector",
+  "version": "3.2.0",
+  "description": "Zero-knowledge credential injection for Keyrail Cloud PAM. Secrets never enter page context.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "cookies", "alarms"],
+  "host_permissions": ["https://pam.keyrail.cloud/*"],
+  "background": { "service_worker": "dist/background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Keyrail" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  },
+  "web_accessible_resources": []
+}

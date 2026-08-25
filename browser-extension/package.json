@@ -1,0 +1,17 @@
+{
+  "name": "keyrail-browser-connector",
+  "version": "3.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Keyrail PAM browser connector — domain-allowlisted, isolated-world credential injection (Manifest V3)",
+  "scripts": {
+    "build": "esbuild src/background.ts src/injector.ts src/popup.ts --outdir=dist --bundle --format=iife --target=chrome120 --minify",
+    "watch": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.5.0"
+  }
+}
