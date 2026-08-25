@@ -7,8 +7,26 @@ import { buildApp } from './routes.js';
 import { pool, redis, cfg, withTenant } from './db.js';
 
 async function main() {
+  // Startup validation: fail closed in production-like mode
+  if (process.env.PRODUCTION === 'true') {
+    if (!cfg.cookieSecret || typeof cfg.cookieSecret !== 'string' || cfg.cookieSecret.length < 64) {
+      console.error('FATAL: COOKIE_SECRET is missing or too weak. Set a 64+ byte secret in production.');
+      process.exit(1);
+    }
+    if (cfg.kmsProvider === 'local') {
+      console.error('FATAL: KMS_PROVIDER=local is not allowed in PRODUCTION mode. Configure a real KMS.');
+      process.exit(1);
+    }
+  }
+
   const app = await buildApp();
-  await redis.connect().catch(() => app.log.warn('redis unavailable — session store degraded'));
+
+  // try to connect redis early so health/readiness can report correct status
+  try {
+    await redis.connect();
+  } catch (e) {
+    app.log.warn('redis unavailable at startup — session store degraded');
+  }
 
   // periodic: expire grants, JIT windows, idle sessions.
   // All targets are RLS-FORCED, so sweep per tenant inside a pinned transaction.
