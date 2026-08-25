@@ -148,6 +148,7 @@ const launchSeries = [14, 18, 11, 22, 27, 19, 31, 24, 29, 35, 26, 33, 38, 30];
 let version = 0;
 let seq = 0;
 let prevHash = '0'.repeat(16);
+let ACTIVE_KEY_VERSION = 15;
 const listeners = new Set<() => void>();
 
 function bump() { version++; listeners.forEach((l) => l()); }
@@ -182,6 +183,12 @@ const ROLE_PERMS: Record<string, string[]> = {
   USER: ['credential.view_metadata', 'credential.use', 'application.launch', 'session.start'],
   READ_ONLY: ['credential.view_metadata'],
 };
+
+/** Effective permission check for a role (UI gating only — the engine re-checks on every call). */
+export function roleCan(role: string, perm: string): boolean {
+  const p = ROLE_PERMS[role] ?? [];
+  return p.includes('*') || p.includes(perm);
+}
 
 function has(perm: string): boolean {
   if (!session) return false;
@@ -541,6 +548,143 @@ export const pam = {
     const ev = auditLog('RED_TEAM_PROBE', { actor, result: 'DENIED', resourceId: attack, resourceName: t.label, meta: t.vector });
     bump();
     return { attack, ...t, auditId: ev.id };
+  },
+
+  /* ================= write side (permission-gated, audited) ================= */
+
+  /** One-time strong secret for onboarding. Shown once at creation, then sealed. */
+  proposeSecret(len = 24): string {
+    requireSession();
+    return genSecret(len);
+  },
+
+  createCredential(input: {
+    name: string; target: string; kind: CredMeta['kind']; username: string; secret: string;
+    collectionIds: string[]; access: CredMeta['access']; jitWindowMin?: number; rotationPolicy?: string;
+  }) {
+    const actor = requireSession();
+    if (!has('credential.create')) {
+      const ev = auditLog('ACCESS_DENIED', { actor, result: 'DENIED', meta: 'credential.create missing on vault write attempt' });
+      throw pamErr('NO_CREATE_PERM', 'Your role cannot write to the vault (credential.create required).', ev.id);
+    }
+    if (input.name.trim().length < 3 || input.target.trim().length < 3 || !input.username.trim())
+      throw pamErr('VALIDATION', 'Name, target and account are required.');
+    if (input.secret.length < 12)
+      throw pamErr('WEAK_SECRET', 'Secret must be ≥ 12 characters — use the generator.');
+    if (!input.collectionIds.length)
+      throw pamErr('VALIDATION', 'Assign at least one collection — unscoped credentials are forbidden.');
+    if (CREDENTIALS.some((c) => c.name.toLowerCase() === input.name.trim().toLowerCase()))
+      throw pamErr('DUPLICATE', 'A credential with this name already exists in the tenant.');
+
+    const cred: CredMeta = {
+      id: uid('cred'), tenantId: TENANT.id, name: input.name.trim(), target: input.target.trim(),
+      kind: input.kind, username: input.username.trim(), collectionIds: input.collectionIds,
+      keyVersion: ACTIVE_KEY_VERSION, rotationPolicy: input.rotationPolicy ?? 'manual',
+      rotatedAt: now(), health: 'VERIFIED', access: input.access, jitWindowMin: input.jitWindowMin,
+      versions: [{ v: ACTIVE_KEY_VERSION, ts: now(), event: 'Created & sealed' }], secretLen: input.secret.length,
+    };
+    PLAINTEXT.set(cred.id, input.secret);
+    SECRET_VAULT.set(cred.id, { ciphertextProxy: rnd(32), nonce: rnd(12), keyVersion: ACTIVE_KEY_VERSION, len: input.secret.length });
+    CREDENTIALS.push(cred);
+    ROTATION.push({
+      credentialId: cred.id, credentialName: cred.name, policy: cred.rotationPolicy,
+      lastRun: now(), nextRun: now() + 30 * 24 * 60 * MIN, status: 'HEALTHY',
+      history: [{ ts: now(), result: 'SUCCESS', keyVersion: ACTIVE_KEY_VERSION }],
+    });
+    auditLog('CREDENTIAL_CREATED', { actor, resourceId: cred.id, resourceName: cred.name, meta: `sealed under DEK v${ACTIVE_KEY_VERSION} · ${input.secret.length} chars · unrecoverable from UI` });
+    bump();
+    return { id: cred.id, keyVersion: ACTIVE_KEY_VERSION };
+  },
+
+  updateCredential(id: string, patch: { name?: string; access?: CredMeta['access']; rotationPolicy?: string }) {
+    const actor = requireSession();
+    if (!has('credential.update')) throw pamErr('NO_UPDATE_PERM', 'credential.update required.');
+    const cred = CREDENTIALS.find((c) => c.id === id);
+    if (!cred) throw pamErr('NOT_FOUND', 'Credential not found.');
+    if (patch.name) cred.name = patch.name.trim();
+    if (patch.access) { cred.access = patch.access; cred.jitWindowMin = patch.access === 'PERMANENT' ? undefined : (cred.jitWindowMin ?? 30); }
+    if (patch.rotationPolicy) cred.rotationPolicy = patch.rotationPolicy;
+    const job = ROTATION.find((j) => j.credentialId === id);
+    if (job) { job.credentialName = cred.name; job.policy = cred.rotationPolicy; }
+    auditLog('CREDENTIAL_UPDATED', { actor, resourceId: id, resourceName: cred.name, meta: 'metadata changed · ciphertext untouched' });
+    bump();
+  },
+
+  createCollection(input: { name: string; description?: string; memberUserIds: string[] }) {
+    const actor = requireSession();
+    if (!has('policy.create')) throw pamErr('NO_POLICY_PERM', 'policy.create required to manage collections.');
+    if (input.name.trim().length < 2) throw pamErr('VALIDATION', 'Collection name required.');
+    if (COLLECTIONS.some((c) => c.name.toLowerCase() === input.name.trim().toLowerCase()))
+      throw pamErr('DUPLICATE', 'Collection name already exists.');
+    const hue = [...input.name].reduce((a, ch) => a + ch.charCodeAt(0) * 7, 40) % 360;
+    const col: CollectionMeta = { id: uid('col'), name: input.name.trim(), hue, description: input.description?.trim() ?? '', memberUserIds: input.memberUserIds };
+    COLLECTIONS.push(col);
+    input.memberUserIds.forEach((uidX) => { const u = USERS.find((x) => x.id === uidX); if (u && !u.collectionIds.includes(col.id)) u.collectionIds.push(col.id); });
+    auditLog('POLICY_CHANGED', { actor, resourceId: col.id, resourceName: col.name, meta: `collection created · ${input.memberUserIds.length} members` });
+    bump();
+    return { id: col.id };
+  },
+
+  createUser(input: { name: string; email: string; title?: string; role: SessionUser['role']; collectionIds: string[] }) {
+    const actor = requireSession();
+    if (!has('user.create')) {
+      const ev = auditLog('ACCESS_DENIED', { actor, result: 'DENIED', meta: 'user.create missing on provisioning attempt' });
+      throw pamErr('NO_USER_CREATE', 'Your role cannot provision users (user.create required).', ev.id);
+    }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(input.email.trim())) throw pamErr('VALIDATION', 'Valid email required.');
+    if (USERS.some((u) => u.email.toLowerCase() === input.email.trim().toLowerCase()))
+      throw pamErr('DUPLICATE', 'This email is already provisioned in the tenant.');
+    const hue = [...input.name].reduce((a, ch) => a + ch.charCodeAt(0) * 11, 20) % 360;
+    const u: UserMeta = {
+      id: uid('usr'), tenantId: TENANT.id, name: input.name.trim(), email: input.email.trim().toLowerCase(),
+      role: input.role, title: input.title?.trim() || 'Team member', hue, mfaMethod: 'TOTP',
+      status: 'ACTIVE', collectionIds: [...input.collectionIds],
+    };
+    USERS.push(u);
+    auditLog('USER_CREATED', { actor, resourceId: u.id, resourceName: u.name, meta: `provisioned · ${u.email} · MFA enrolment enforced at first login` });
+    auditLog('ROLE_CHANGED', { actor, resourceId: u.id, resourceName: u.name, meta: `role=${u.role} granted by ${actor.name}` });
+    bump();
+    return { id: u.id };
+  },
+
+  createApplication(input: { name: string; kind: AppMeta['kind']; domain: string; url?: string; credentialId: string; blurb?: string }) {
+    const actor = requireSession();
+    if (!has('policy.create')) throw pamErr('NO_POLICY_PERM', 'policy.create required to onboard applications.');
+    if (input.name.trim().length < 2) throw pamErr('VALIDATION', 'Application name required.');
+    if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?$/i.test(input.domain.trim()))
+      throw pamErr('VALIDATION', 'Domain must look like app.example.com — this is the injection allowlist.');
+    const cred = CREDENTIALS.find((c) => c.id === input.credentialId);
+    if (!cred) throw pamErr('NOT_FOUND', 'Map the application to an existing credential.');
+    if (APPS.some((a) => a.credentialId === input.credentialId))
+      throw pamErr('ALREADY_MAPPED', 'That credential is already mapped to an application.');
+    const hue = [...input.name].reduce((a, ch) => a + ch.charCodeAt(0) * 13, 90) % 360;
+    const app: AppMeta = {
+      id: uid('app'), name: input.name.trim(), kind: input.kind, domain: input.domain.trim().toLowerCase(),
+      url: input.url?.trim() || `https://${input.domain.trim().toLowerCase()}`, hue,
+      glyph: input.kind === 'DB' ? 'db' : input.kind === 'SSH' ? 'terminal' : 'cpanel',
+      credentialId: input.credentialId, viaConnector: false,
+      blurb: input.blurb?.trim() || `Custom connector · ${input.domain}`,
+    };
+    APPS.push(app);
+    auditLog('POLICY_CHANGED', { actor, resourceId: app.id, resourceName: app.name, meta: `application onboarded · injection allowlist ${app.domain} · mapped to ${cred.name}` });
+    bump();
+    return { id: app.id };
+  },
+
+  /** Tenant key ceremony: fresh DEK version, every credential re-sealed. */
+  rotateTenantKey(): number {
+    const actor = requireSession();
+    if (!has('policy.update')) throw pamErr('NO_POLICY_PERM', 'policy.update required for the key ceremony.');
+    ACTIVE_KEY_VERSION += 1;
+    CREDENTIALS.forEach((c) => {
+      const len = SECRET_VAULT.get(c.id)?.len ?? c.secretLen;
+      SECRET_VAULT.set(c.id, { ciphertextProxy: rnd(32), nonce: rnd(12), keyVersion: ACTIVE_KEY_VERSION, len });
+      c.keyVersion = ACTIVE_KEY_VERSION;
+      c.versions.unshift({ v: ACTIVE_KEY_VERSION, ts: now(), event: 'Tenant key ceremony' });
+    });
+    auditLog('POLICY_CHANGED', { actor, meta: `tenant DEK rotated to v${ACTIVE_KEY_VERSION} · ${CREDENTIALS.length} credentials re-sealed · old wrapped DEK retired` });
+    bump();
+    return ACTIVE_KEY_VERSION;
   },
 
   snapshot(): Snapshot {

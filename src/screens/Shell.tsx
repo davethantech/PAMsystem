@@ -106,6 +106,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         </nav>
 
         <div className="p-3 border-t border-[var(--line)] relative">
+          <div className="font-mono text-[8.5px] tracking-[0.16em] text-[var(--dim)] px-2 pb-2 flex items-center gap-1.5">
+            <Dot tone="var(--amber)" /> IN-MEMORY DEMO · CHANGES RESET ON RELOAD
+          </div>
           {menuOpen && (
             <div className="absolute bottom-[64px] left-3 right-3 panel-solid p-2 rise-in z-50">
               <div className="font-mono text-[9.5px] tracking-[0.18em] text-[var(--dim)] px-2 py-1.5">SWITCH DEMO PERSONA</div>

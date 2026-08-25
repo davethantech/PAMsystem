@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { pam, isPamError } from '../engine/pam';
+import { pam, isPamError, roleCan } from '../engine/pam';
 import type { AppMeta, CredMeta, GrantMeta, SessionRec } from '../engine/types';
 import { I } from '../components/icons';
 import { Chip, CountRing, Dot, Masked, Modal, Reveal, fmtDur, fmtHM, timeAgo, REDUCED_MOTION } from '../components/ui';
@@ -374,10 +374,15 @@ export function TargetSessionOverlay() {
 
 /* ---------------- launcher page ---------------- */
 export default function Launcher() {
-  const { snap, user, setRoute } = usePam();
+  const { snap, user, setRoute, toast } = usePam();
   const [launching, setLaunching] = useState<{ app: AppMeta; cred: CredMeta } | null>(null);
   const [requesting, setRequesting] = useState<string | null>(null);
   const [filter, setFilter] = useState('ALL');
+  const [appModal, setAppModal] = useState(false);
+  const [aform, setAform] = useState({ name: '', kind: 'WEB' as AppMeta['kind'], domain: '', url: '', blurb: '', credentialId: '' });
+  const [aerr, setAerr] = useState('');
+  const canOnboard = roleCan(user!.role, 'policy.create');
+  const unmapped = snap.credentials.filter((c) => !snap.apps.some((a) => a.credentialId === c.id));
 
   const visible = useMemo(() => {
     const list: { app: AppMeta; cred: CredMeta; allowed: boolean; approvedWindow?: number }[] = [];
@@ -411,6 +416,11 @@ export default function Launcher() {
           <span className="flex-1" />
           <Chip tone="teal"><I n="ext" className="w-3.5 h-3.5" /> Browser connector connected · v3.2</Chip>
           <Chip><I n="globe" className="w-3.5 h-3.5" /> domain-allowlist enforced</Chip>
+          {canOnboard && (
+            <button className="btn btn-primary btn-sm" onClick={() => { setAform({ name: '', kind: 'WEB', domain: '', url: '', blurb: '', credentialId: unmapped[0]?.id ?? '' }); setAerr(''); setAppModal(true); }}>
+              <I n="plus" className="w-3.5 h-3.5" /> Onboard application
+            </button>
+          )}
         </div>
       </Reveal>
 
@@ -494,6 +504,60 @@ export default function Launcher() {
 
       {launching && <LaunchModal app={launching.app} cred={launching.cred} onClose={() => setLaunching(null)} />}
       <RequestAccessModal credId={requesting} onClose={() => setRequesting(null)} />
+
+      {/* ---- onboard application: credential → domain allowlist → launchable ---- */}
+      <Modal open={appModal} onClose={() => setAppModal(false)} title="Onboard application" width={560}>
+        <div className="space-y-4">
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">MAP TO CREDENTIAL</label>
+            <select className="input mt-1.5" value={aform.credentialId} onChange={(e) => setAform((f) => ({ ...f, credentialId: e.target.value }))}>
+              {unmapped.length === 0 && <option value="">— every credential is already mapped —</option>}
+              {unmapped.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.target}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">APPLICATION NAME</label>
+              <input className="input mt-1.5" placeholder="Shopify Admin" value={aform.name} onChange={(e) => setAform((f) => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">CONNECTOR TYPE</label>
+              <select className="input mt-1.5" value={aform.kind} onChange={(e) => setAform((f) => ({ ...f, kind: e.target.value as AppMeta['kind'] }))}>
+                <option value="WEB">WEB — browser injection</option>
+                <option value="DB">DB — proxied client</option>
+                <option value="SSH">SSH — brokered shell</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">LOGIN DOMAIN — THE INJECTION ALLOWLIST</label>
+            <input className="input mt-1.5 font-mono" placeholder="admin.shopify.com" value={aform.domain} onChange={(e) => setAform((f) => ({ ...f, domain: e.target.value }))} />
+            <p className="font-mono text-[10px] text-[var(--dim)] mt-1.5">the connector refuses to inject on any other hostname — phishing-proof by construction</p>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">START URL (optional)</label>
+              <input className="input mt-1.5 font-mono" placeholder="https://admin.shopify.com" value={aform.url} onChange={(e) => setAform((f) => ({ ...f, url: e.target.value }))} />
+            </div>
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">DESCRIPTION (optional)</label>
+              <input className="input mt-1.5" placeholder="Store admin console" value={aform.blurb} onChange={(e) => setAform((f) => ({ ...f, blurb: e.target.value }))} />
+            </div>
+          </div>
+          {aerr && <p className="text-[#ff9d94] text-[12.5px] font-mono">⊘ {aerr}</p>}
+          <div className="flex gap-3 justify-end">
+            <button className="btn btn-ghost" onClick={() => setAppModal(false)}>Cancel</button>
+            <button className="btn btn-primary" disabled={!aform.credentialId} onClick={() => {
+              setAerr('');
+              try {
+                pam.createApplication({ name: aform.name, kind: aform.kind, domain: aform.domain, url: aform.url, credentialId: aform.credentialId, blurb: aform.blurb });
+                toast(`${aform.name} onboarded — launchable immediately, allowlist ${aform.domain}`, 'teal');
+                setAppModal(false);
+              } catch (e) { setAerr(isPamError(e) ? e.message : 'Onboarding failed'); }
+            }}><I n="launch" className="w-4 h-4" /> Onboard & audit</button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

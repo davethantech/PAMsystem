@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { pam, isPamError } from '../engine/pam';
-import type { ProbeResult } from '../engine/types';
+import type { ProbeResult, SessionUser } from '../engine/types';
 import { I } from '../components/icons';
 import { Chip, CountRing, Dot, Masked, Modal, Reveal, StatusPill, Toggle, timeAgo } from '../components/ui';
 import { usePam } from '../state/store';
@@ -22,15 +22,27 @@ const ROLE_PERM_GRID: Record<string, string[]> = {
 };
 
 export function UsersPage() {
-  const { snap } = usePam();
+  const { snap, user, toast } = usePam();
   const roles = Object.keys(ROLE_PERM_GRID);
   const has = (role: string, perm: string) => ROLE_PERM_GRID[role].includes('*') || ROLE_PERM_GRID[role].includes(perm);
+  const canProvision = has(user!.role, 'user.create');
+  const [adding, setAdding] = useState(false);
+  const [uform, setUform] = useState({ name: '', email: '', title: '', role: 'USER' as SessionUser['role'], cols: [] as string[] });
+  const [uerr, setUerr] = useState('');
 
   return (
     <div className="space-y-6 max-w-[1180px]">
       <Reveal>
         <div className="panel overflow-hidden">
-          <div className="px-5 py-3.5 border-b border-[var(--line)] font-display font-semibold">Directory · {snap.users.length} identities</div>
+          <div className="px-5 py-3.5 border-b border-[var(--line)] font-display font-semibold flex items-center gap-3">
+            Directory · {snap.users.length} identities
+            <span className="flex-1" />
+            {canProvision && (
+              <button className="btn btn-primary btn-sm" onClick={() => { setUform({ name: '', email: '', title: '', role: 'USER', cols: [] }); setUerr(''); setAdding(true); }}>
+                <I n="plus" className="w-3.5 h-3.5" /> Add user
+              </button>
+            )}
+          </div>
           <div className="overflow-x-auto">
             <table className="table-base">
               <thead><tr><th>User</th><th>Role</th><th>MFA</th><th>Collections</th><th>Last sign-in</th><th>Status</th></tr></thead>
@@ -57,7 +69,7 @@ export function UsersPage() {
                         })}
                       </div>
                     </td>
-                    <td className="font-mono text-[11px] text-[var(--dim)]">{timeAgo(u.lastLogin)}</td>
+                    <td className="font-mono text-[11px] text-[var(--dim)]">{u.lastLogin ? timeAgo(u.lastLogin) : 'never'}</td>
                     <td><StatusPill status={u.status} /></td>
                   </tr>
                 ))}
@@ -102,6 +114,64 @@ export function UsersPage() {
           </div>
         </div>
       </Reveal>
+
+      {/* ---- provision user ---- */}
+      <Modal open={adding} onClose={() => setAdding(false)} title="Provision user" width={560}>
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">FULL NAME</label>
+              <input className="input mt-1.5" placeholder="Ava Chen" value={uform.name} onChange={(e) => setUform((f) => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">EMAIL</label>
+              <input className="input mt-1.5" placeholder="ava@meridian.dev" value={uform.email} onChange={(e) => setUform((f) => ({ ...f, email: e.target.value }))} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">TITLE</label>
+              <input className="input mt-1.5" placeholder="Support Engineer" value={uform.title} onChange={(e) => setUform((f) => ({ ...f, title: e.target.value }))} />
+            </div>
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">ROLE</label>
+              <select className="input mt-1.5" value={uform.role} onChange={(e) => setUform((f) => ({ ...f, role: e.target.value as SessionUser['role'] }))}>
+                {['USER', 'READ_ONLY', 'AUDITOR', 'PAM_ADMIN', 'SECURITY_ADMIN', 'ORG_ADMIN'].map((r) => <option key={r} value={r}>{r.replace('_', ' ')}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">COLLECTION ACCESS</label>
+            <div className="flex flex-wrap gap-2 mt-1.5">
+              {snap.collections.map((c) => {
+                const on = uform.cols.includes(c.id);
+                return (
+                  <button key={c.id} onClick={() => setUform((f) => ({ ...f, cols: on ? f.cols.filter((x) => x !== c.id) : [...f.cols, c.id] }))}
+                    className="chip cursor-pointer transition-all" style={on ? { color: `hsl(${c.hue} 75% 68%)`, borderColor: `hsl(${c.hue} 55% 45% / .6)`, background: `hsl(${c.hue} 50% 20% / .35)` } : {}}>
+                    {on ? '✓ ' : ''}{c.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {uerr && <p className="text-[#ff9d94] text-[12.5px] font-mono">⊘ {uerr}</p>}
+          <p className="text-[11.5px] text-[var(--mut)] leading-relaxed">
+            MFA enrolment is enforced at first sign-in. Roles map through the RBAC matrix above —
+            <span className="text-[var(--amber)]"> credential.use never grants credential.reveal</span>.
+          </p>
+          <div className="flex gap-3 justify-end">
+            <button className="btn btn-ghost" onClick={() => setAdding(false)}>Cancel</button>
+            <button className="btn btn-primary" onClick={() => {
+              setUerr('');
+              try {
+                pam.createUser({ name: uform.name, email: uform.email, title: uform.title, role: uform.role, collectionIds: uform.cols });
+                toast(`${uform.name} provisioned as ${uform.role.replace('_', ' ')} — switch persona to sign in as them`, 'teal');
+                setAdding(false);
+              } catch (e) { setUerr(isPamError(e) ? e.message : 'Provisioning failed'); }
+            }}><I n="users" className="w-4 h-4" /> Provision & audit</button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

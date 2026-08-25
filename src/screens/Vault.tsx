@@ -18,6 +18,38 @@ export default function Vault() {
   const [launching, setLaunching] = useState<CredMeta | null>(null);
   const [requesting, setRequesting] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [cstep, setCstep] = useState<'form' | 'reveal'>('form');
+  const [cform, setCform] = useState({ name: '', target: '', kind: 'PASSWORD' as CredMeta['kind'], username: '', access: 'PERMANENT' as CredMeta['access'], rotation: 'manual', secret: '', generated: false, jit: 30, cols: [] as string[] });
+  const [cerr, setCerr] = useState('');
+  const [colModal, setColModal] = useState(false);
+  const [colForm, setColForm] = useState({ name: '', description: '', members: [] as string[] });
+  const [editing, setEditing] = useState(false);
+  const [eform, setEform] = useState({ name: '', access: 'PERMANENT' as CredMeta['access'], rotation: 'manual' });
+
+  const resetCreate = () => { setCform({ name: '', target: '', kind: 'PASSWORD', username: '', access: 'PERMANENT', rotation: 'manual', secret: '', generated: false, jit: 30, cols: [] }); setCstep('form'); setCerr(''); setCreating(false); };
+
+  const sealCredential = () => {
+    try {
+      const r = pam.createCredential({
+        name: cform.name, target: cform.target, kind: cform.kind, username: cform.username,
+        secret: cform.secret, collectionIds: cform.cols, access: cform.access,
+        jitWindowMin: cform.access === 'PERMANENT' ? undefined : cform.jit, rotationPolicy: cform.rotation,
+      });
+      toast(`"${cform.name}" sealed under DEK v${r.keyVersion} — the secret is now unrecoverable from this UI`, 'teal');
+      resetCreate();
+    } catch (e) { setCerr(isPamError(e) ? e.message : 'Create failed'); }
+  };
+
+  const openEdit = (c: CredMeta) => { setEform({ name: c.name, access: c.access, rotation: c.rotationPolicy }); setEditing(true); };
+  const saveEdit = () => {
+    if (!drawer) return;
+    try {
+      pam.updateCredential(drawer.id, { name: eform.name, access: eform.access, rotationPolicy: eform.rotation });
+      toast('Metadata updated — ciphertext untouched, change audited', 'teal');
+      setEditing(false); setDrawer(null);
+    } catch (e) { toast(isPamError(e) ? e.message : 'Update failed', 'red'); }
+  };
 
   const isAdmin = ['PAM_ADMIN', 'ORG_ADMIN', 'SUPER_ADMIN', 'SECURITY_ADMIN'].includes(user!.role);
   const isSecurity = ['SECURITY_ADMIN', 'SUPER_ADMIN'].includes(user!.role);
@@ -62,6 +94,12 @@ export default function Vault() {
           <span className="flex-1" />
           <Chip><I n="lock" className="w-3.5 h-3.5" /> AES-256-GCM envelope · KMS-wrapped DEKs</Chip>
           <Chip tone="red"><I n="eyeOff" className="w-3.5 h-3.5" /> plaintext: zero endpoints</Chip>
+          {isAdmin && (
+            <>
+              <button className="btn btn-ghost btn-sm" onClick={() => { setColForm({ name: '', description: '', members: [] }); setColModal(true); }}><I n="plus" className="w-3.5 h-3.5" /> Collection</button>
+              <button className="btn btn-primary btn-sm" onClick={() => { resetCreate(); setCreating(true); }}><I n="plus" className="w-3.5 h-3.5" /> New credential</button>
+            </>
+          )}
         </div>
       </Reveal>
 
@@ -105,7 +143,9 @@ export default function Vault() {
                     </td>
                     <td onClick={(e) => e.stopPropagation()}>
                       <div className="flex justify-end gap-1.5">
-                        {c.access === 'PERMANENT' ? (
+                        {!snap.apps.some((a) => a.credentialId === c.id) ? (
+                          <span className="chip chip-amber !text-[9px]" title="Onboard an application in the Launcher to make this credential launchable">MAP AN APP ▸</span>
+                        ) : c.access === 'PERMANENT' ? (
                           <button className="btn btn-primary btn-sm" onClick={() => setLaunching(c)}><I n="launch" className="w-3.5 h-3.5" /> Launch</button>
                         ) : (
                           <button className="btn btn-amber btn-sm" onClick={() => setRequesting(c.id)}><I n="bolt" className="w-3.5 h-3.5" /> Request</button>
@@ -162,10 +202,34 @@ export default function Vault() {
                 <div className="panel p-3"><div className="font-mono text-[9.5px] text-[var(--dim)] tracking-wider">HEALTH</div><div className="mt-1"><StatusPill status={drawer.health} /></div></div>
               </div>
 
-              {isAdmin && (
-                <button className="btn btn-ghost w-full" onClick={() => rotate(drawer)} disabled={rotating}>
-                  <I n="rotate" className={`w-4 h-4 ${rotating ? 'animate-spin' : ''}`} /> {rotating ? 'Generating → applying → verifying…' : 'Rotate now (verify-before-store)'}
-                </button>
+              {isAdmin && !editing && (
+                <div className="flex gap-2">
+                  <button className="btn btn-ghost flex-1" onClick={() => rotate(drawer)} disabled={rotating}>
+                    <I n="rotate" className={`w-4 h-4 ${rotating ? 'animate-spin' : ''}`} /> {rotating ? 'Verifying…' : 'Rotate now'}
+                  </button>
+                  <button className="btn btn-ghost flex-1" onClick={() => openEdit(drawer)}><I n="doc" className="w-4 h-4" /> Edit metadata</button>
+                </div>
+              )}
+              {isAdmin && editing && (
+                <div className="border border-[rgba(58,214,181,0.35)] rounded-lg p-4 space-y-3 rise-in">
+                  <div className="font-mono text-[10px] tracking-[0.18em] text-[var(--teal)]">EDIT METADATA — CIPHERTEXT UNTOUCHED</div>
+                  <input className="input" value={eform.name} onChange={(e) => setEform((f) => ({ ...f, name: e.target.value }))} />
+                  <div className="grid grid-cols-2 gap-3">
+                    <select className="input" value={eform.access} onChange={(e) => setEform((f) => ({ ...f, access: e.target.value as CredMeta['access'] }))}>
+                      <option value="PERMANENT">PERMANENT</option>
+                      <option value="APPROVAL_REQUIRED">JIT / APPROVAL</option>
+                      <option value="ONE_TIME">ONE-TIME</option>
+                      <option value="EMERGENCY">EMERGENCY</option>
+                    </select>
+                    <select className="input" value={eform.rotation} onChange={(e) => setEform((f) => ({ ...f, rotation: e.target.value }))}>
+                      {['manual', 'every-1d', 'every-7d', 'every-30d', 'every-90d', 'after-session'].map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn btn-primary flex-1" onClick={saveEdit}><I n="check" className="w-4 h-4" /> Save & audit</button>
+                    <button className="btn btn-ghost" onClick={() => setEditing(false)}>Cancel</button>
+                  </div>
+                </div>
               )}
 
               <div>
@@ -217,6 +281,150 @@ export default function Vault() {
         return app ? <LaunchModal app={app} cred={launching} onClose={() => setLaunching(null)} /> : null;
       })()}
       <RequestAccessModal credId={requesting} onClose={() => setRequesting(null)} />
+
+      {/* ---- create credential: form → one-time reveal → sealed forever ---- */}
+      <Modal open={creating} onClose={resetCreate} width={640}
+        title={cstep === 'form' ? 'New credential — onboard a secret' : 'Store this now — it is shown exactly once'}
+        tone={cstep === 'form' ? 'teal' : 'amber'}>
+        {cstep === 'form' ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">NAME</label>
+                <input className="input mt-1.5" placeholder="Stripe — Live API Key" value={cform.name} onChange={(e) => setCform((f) => ({ ...f, name: e.target.value }))} />
+              </div>
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">TARGET / HOST</label>
+                <input className="input mt-1.5" placeholder="api.stripe.com" value={cform.target} onChange={(e) => setCform((f) => ({ ...f, target: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">KIND</label>
+                <select className="input mt-1.5" value={cform.kind} onChange={(e) => setCform((f) => ({ ...f, kind: e.target.value as CredMeta['kind'] }))}>
+                  {['PASSWORD', 'API_KEY', 'SSH_KEY', 'TOKEN', 'CERTIFICATE', 'SECURE_NOTE', 'RECOVERY_CODES'].map((k) => <option key={k}>{k}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">ACCOUNT / USERNAME</label>
+                <input className="input mt-1.5" placeholder="svc-deploy" value={cform.username} onChange={(e) => setCform((f) => ({ ...f, username: e.target.value }))} />
+              </div>
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">ROTATION</label>
+                <select className="input mt-1.5" value={cform.rotation} onChange={(e) => setCform((f) => ({ ...f, rotation: e.target.value }))}>
+                  {['manual', 'every-1d', 'every-7d', 'every-30d', 'every-90d', 'after-session'].map((p) => <option key={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">COLLECTIONS (who can launch it)</label>
+              <div className="flex flex-wrap gap-2 mt-1.5">
+                {snap.collections.map((c) => {
+                  const on = cform.cols.includes(c.id);
+                  return (
+                    <button key={c.id} onClick={() => setCform((f) => ({ ...f, cols: on ? f.cols.filter((x) => x !== c.id) : [...f.cols, c.id] }))}
+                      className="chip cursor-pointer transition-all" style={on ? { color: `hsl(${c.hue} 75% 68%)`, borderColor: `hsl(${c.hue} 55% 45% / .6)`, background: `hsl(${c.hue} 50% 20% / .35)` } : {}}>
+                      {on ? '✓ ' : ''}{c.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="grid grid-cols-[1fr_150px] gap-4">
+              <div>
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">ACCESS MODE</label>
+                <select className="input mt-1.5" value={cform.access} onChange={(e) => setCform((f) => ({ ...f, access: e.target.value as CredMeta['access'] }))}>
+                  <option value="PERMANENT">PERMANENT — collection members can launch</option>
+                  <option value="APPROVAL_REQUIRED">JIT — approval window required</option>
+                </select>
+              </div>
+              {cform.access === 'APPROVAL_REQUIRED' && (
+                <div>
+                  <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">JIT WINDOW (MIN)</label>
+                  <input type="number" className="input mt-1.5" value={cform.jit} min={5} max={480} onChange={(e) => setCform((f) => ({ ...f, jit: Number(e.target.value) }))} />
+                </div>
+              )}
+            </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">SECRET</label>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setCform((f) => ({ ...f, secret: pam.proposeSecret(24), generated: true })); setCstep('form'); }}>
+                  <I n="rotate" className="w-3.5 h-3.5" /> Generate strong secret
+                </button>
+              </div>
+              <input type="password" className="input mt-1.5 font-mono" placeholder={cform.generated ? 'generated below' : 'paste or type (min 12 chars)'} value={cform.generated ? '' : cform.secret} onChange={(e) => setCform((f) => ({ ...f, secret: e.target.value, generated: false }))} />
+              {cform.generated && (
+                <div className="mt-2 rounded-lg border border-[rgba(58,214,181,0.4)] bg-[rgba(8,16,32,0.8)] px-4 py-3 font-mono text-[14px] text-[var(--teal)] break-all rise-in">
+                  {cform.secret}
+                </div>
+              )}
+            </div>
+            {cerr && <p className="text-[#ff9d94] text-[12.5px] font-mono">⊘ {cerr}</p>}
+            <div className="flex gap-3 justify-end border-t border-[var(--line)] pt-4">
+              <button className="btn btn-ghost" onClick={resetCreate}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => { setCerr(''); cform.generated ? setCstep('reveal') : sealCredential(); }}>
+                <I n="lock" className="w-4 h-4" /> {cform.generated ? 'Review secret → seal' : 'Seal into vault'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="rounded-lg border border-[rgba(242,180,76,0.45)] bg-[rgba(8,16,32,0.85)] p-5 relative overflow-hidden">
+              <div className="font-mono text-[10px] tracking-[0.2em] text-[var(--amber)] mb-2 flex items-center gap-2"><I n="alert" className="w-3.5 h-3.5" /> ONE-TIME DISPLAY</div>
+              <div className="font-mono text-[17px] text-[var(--amber)] break-all select-all">{cform.secret}</div>
+            </div>
+            <p className="text-[12.5px] text-[var(--mut)] mt-4 leading-relaxed">
+              After you seal it, this value exists <span className="text-[var(--ink)]">only as AES-256-GCM ciphertext</span> under the tenant DEK.
+              No API, no UI control, no export will ever return it again — not even to you.
+            </p>
+            <div className="flex gap-3 justify-end mt-5">
+              <button className="btn btn-ghost" onClick={() => navigator.clipboard?.writeText(cform.secret).then(() => toast('Copied — clear your clipboard history', 'amber')).catch(() => {})}><I n="copy" className="w-4 h-4" /> Copy</button>
+              <button className="btn btn-primary" onClick={sealCredential}><I n="lock" className="w-4 h-4" /> I've stored it — seal forever</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ---- create collection ---- */}
+      <Modal open={colModal} onClose={() => setColModal(false)} title="New collection" width={520}>
+        <div className="space-y-4">
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">NAME</label>
+            <input className="input mt-1.5" placeholder="Payments" value={colForm.name} onChange={(e) => setColForm((f) => ({ ...f, name: e.target.value }))} />
+          </div>
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">DESCRIPTION</label>
+            <input className="input mt-1.5" placeholder="What belongs here…" value={colForm.description} onChange={(e) => setColForm((f) => ({ ...f, description: e.target.value }))} />
+          </div>
+          <div>
+            <label className="font-mono text-[10.5px] tracking-[0.16em] text-[var(--dim)]">MEMBERS (who can see & launch)</label>
+            <div className="space-y-1.5 mt-1.5">
+              {snap.users.filter((u) => u.status === 'ACTIVE').map((u) => {
+                const on = colForm.members.includes(u.id);
+                return (
+                  <button key={u.id} onClick={() => setColForm((f) => ({ ...f, members: on ? f.members.filter((x) => x !== u.id) : [...f.members, u.id] }))}
+                    className={`w-full text-left flex items-center gap-2.5 px-3 py-2 rounded-lg border transition-all cursor-pointer ${on ? 'border-[rgba(58,214,181,0.4)] bg-[rgba(58,214,181,0.06)]' : 'border-[var(--line)] hover:border-[var(--line-strong)]'}`}>
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold" style={{ background: `hsl(${u.hue} 45% 22%)`, color: `hsl(${u.hue} 80% 70%)` }}>{u.name.split(' ').map((x) => x[0]).join('')}</span>
+                    <span className="flex-1 text-[13px]">{u.name}</span>
+                    <span className="font-mono text-[9.5px] text-[var(--dim)]">{u.role.replace('_', ' ')}</span>
+                    {on && <I n="check" className="w-3.5 h-3.5 text-[var(--teal)]" sw={2.4} />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex gap-3 justify-end">
+            <button className="btn btn-ghost" onClick={() => setColModal(false)}>Cancel</button>
+            <button className="btn btn-primary" onClick={() => {
+              try {
+                pam.createCollection({ name: colForm.name, description: colForm.description, memberUserIds: colForm.members });
+                toast(`Collection "${colForm.name}" created — ${colForm.members.length} member(s) granted visibility`, 'teal');
+                setColModal(false);
+              } catch (e) { toast(isPamError(e) ? e.message : 'Failed', 'red'); }
+            }}><I n="plus" className="w-4 h-4" /> Create collection</button>
+          </div>
+        </div>
+      </Modal>
       {/* keep glyph import for drawer parity */}
       <span className="hidden">{typeof AppGlyph === 'function' ? '' : ''}</span>
     </div>

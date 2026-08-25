@@ -42,7 +42,7 @@ export interface UserMeta {
   hue: number;
   mfaMethod: 'TOTP' | 'WEBAUTHN';
   status: 'ACTIVE' | 'DISABLED';
-  lastLogin: number;
+  lastLogin?: number;
   collectionIds: string[];
 }
 
