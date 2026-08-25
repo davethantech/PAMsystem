@@ -33,27 +33,30 @@ async function localUnwrap(wrapped: Buffer) {
 
 /* ---------------- KMS-backed DEK lifecycle -------------------------------- */
 export async function generateDek(tenantId: string): Promise<{ version: number }> {
-  const { rows } = await pool.query(
-    `SELECT coalesce(max(key_version), 0) + 1 AS v FROM encryption_keys WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  const version = Number(rows[0].v);
-  let wrapped: Buffer;
-  if (kms) {
-    const out = await kms.send(new GenerateDataKeyCommand({ KeyId: cfg.kmsKeyId, KeySpec: 'AES_256' }));
-    const dek = out.Plaintext!;
-    wrapped = await wrapDek(Buffer.from(dek));
-    (dek as Uint8Array).fill(0); // zeroize the unwrapped copy immediately
-  } else {
-    const dek = crypto.randomBytes(32);
-    wrapped = await wrapDek(dek);
-    dek.fill(0);
-  }
-  await pool.query(
-    `INSERT INTO encryption_keys (tenant_id, key_version, wrapped_dek) VALUES ($1, $2, $3)`,
-    [tenantId, version, wrapped],
-  );
-  return { version };
+  // encryption_keys is RLS-FORCED → must be touched inside a tenant-pinned tx
+  return withTenant(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `SELECT coalesce(max(key_version), 0) + 1 AS v FROM encryption_keys WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const version = Number(rows[0].v);
+    let wrapped: Buffer;
+    if (kms) {
+      const out = await kms.send(new GenerateDataKeyCommand({ KeyId: cfg.kmsKeyId, KeySpec: 'AES_256' }));
+      const dek = out.Plaintext!;
+      wrapped = await wrapDek(Buffer.from(dek));
+      (dek as Uint8Array).fill(0); // zeroize the unwrapped copy immediately
+    } else {
+      const dek = crypto.randomBytes(32);
+      wrapped = await wrapDek(dek);
+      dek.fill(0);
+    }
+    await client.query(
+      `INSERT INTO encryption_keys (tenant_id, key_version, wrapped_dek) VALUES ($1, $2, $3)`,
+      [tenantId, version, wrapped],
+    );
+    return { version };
+  });
 }
 
 async function wrapDek(dek: Buffer): Promise<Buffer> {
@@ -78,10 +81,11 @@ export async function getDek(tenantId: string, version: number): Promise<Buffer>
   const key = `${tenantId}:${version}`;
   const hit = dekCache.get(key);
   if (hit) return hit;
-  const { rows } = await pool.query(
-    `SELECT wrapped_dek FROM encryption_keys WHERE tenant_id = $1 AND key_version = $2`,
-    [tenantId, version],
-  );
+  const { rows } = await withTenant(tenantId, (client) =>
+    client.query(
+      `SELECT wrapped_dek FROM encryption_keys WHERE tenant_id = $1 AND key_version = $2`,
+      [tenantId, version],
+    ));
   if (!rows.length) throw new Error('unknown key version');
   const dek = await unwrapDek(rows[0].wrapped_dek);
   dekCache.set(key, dek);

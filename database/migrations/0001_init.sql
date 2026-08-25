@@ -122,12 +122,14 @@ CREATE TABLE collections (
 );
 
 CREATE TABLE collection_members (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   collection_id uuid NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   user_id       uuid REFERENCES users(id) ON DELETE CASCADE,
   group_id      uuid REFERENCES groups(id) ON DELETE CASCADE,
-  CHECK (user_id IS NOT NULL OR group_id IS NOT NULL),
-  PRIMARY KEY (collection_id, user_id, group_id)
+  CHECK (user_id IS NOT NULL OR group_id IS NOT NULL)
 );
+CREATE UNIQUE INDEX cm_user_uq  ON collection_members (collection_id, user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX cm_group_uq ON collection_members (collection_id, group_id) WHERE group_id IS NOT NULL;
 
 -- ---------------------------------------------------------------- encryption keys
 CREATE TABLE encryption_keys (
@@ -404,7 +406,7 @@ DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY[
     'users','groups','collections','encryption_keys','credentials','applications',
-    'connectors','access_policies','access_requests','approvals','launch_grants',
+    'connectors','access_policies','access_requests','launch_grants',
     'sessions','audit_events','devices','api_keys','password_rotation_jobs','notifications'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
@@ -414,6 +416,30 @@ BEGIN
       t);
   END LOOP;
 END $$;
+
+-- Join/child tables carry no tenant_id of their own; they inherit isolation from
+-- their RLS-protected parent via EXISTS (the inner scan is itself policy-filtered).
+-- approvals is scoped through access_requests; role_permissions stays global
+-- (it only maps built-in roles to permission names — no tenant data).
+ALTER TABLE credential_collections   ENABLE ROW LEVEL SECURITY; ALTER TABLE credential_collections   FORCE ROW LEVEL SECURITY;
+ALTER TABLE credential_versions      ENABLE ROW LEVEL SECURITY; ALTER TABLE credential_versions      FORCE ROW LEVEL SECURITY;
+ALTER TABLE application_credentials  ENABLE ROW LEVEL SECURITY; ALTER TABLE application_credentials  FORCE ROW LEVEL SECURITY;
+ALTER TABLE collection_members       ENABLE ROW LEVEL SECURITY; ALTER TABLE collection_members       FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_roles               ENABLE ROW LEVEL SECURITY; ALTER TABLE user_roles               FORCE ROW LEVEL SECURITY;
+ALTER TABLE groups_users             ENABLE ROW LEVEL SECURITY; ALTER TABLE groups_users             FORCE ROW LEVEL SECURITY;
+ALTER TABLE groups_roles             ENABLE ROW LEVEL SECURITY; ALTER TABLE groups_roles             FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events           ENABLE ROW LEVEL SECURITY; ALTER TABLE session_events           FORCE ROW LEVEL SECURITY;
+ALTER TABLE approvals                ENABLE ROW LEVEL SECURITY; ALTER TABLE approvals                FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY parent_scoped ON credential_collections  USING (EXISTS (SELECT 1 FROM credentials  WHERE credentials.id  = credential_id));
+CREATE POLICY parent_scoped ON credential_versions     USING (EXISTS (SELECT 1 FROM credentials  WHERE credentials.id  = credential_id));
+CREATE POLICY parent_scoped ON application_credentials USING (EXISTS (SELECT 1 FROM applications WHERE applications.id = application_id));
+CREATE POLICY parent_scoped ON collection_members      USING (EXISTS (SELECT 1 FROM collections  WHERE collections.id  = collection_id));
+CREATE POLICY parent_scoped ON user_roles              USING (EXISTS (SELECT 1 FROM users        WHERE users.id        = user_id));
+CREATE POLICY parent_scoped ON groups_users            USING (EXISTS (SELECT 1 FROM users        WHERE users.id        = user_id));
+CREATE POLICY parent_scoped ON groups_roles            USING (EXISTS (SELECT 1 FROM groups       WHERE groups.id       = group_id));
+CREATE POLICY parent_scoped ON session_events          USING (EXISTS (SELECT 1 FROM sessions     WHERE sessions.id     = session_id));
+CREATE POLICY parent_scoped ON approvals               USING (EXISTS (SELECT 1 FROM access_requests WHERE access_requests.id = request_id));
 
 -- superuser bypass guard: app role must never be a superuser in production.
 COMMENT ON TABLE credentials IS 'Ciphertext only. Plaintext exists solely in broker enclave memory.';

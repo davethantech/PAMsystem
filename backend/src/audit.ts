@@ -60,10 +60,11 @@ export async function audit(ev: AuditInput): Promise<{ id: string; hash: string 
 
 /** Verify the whole chain for a tenant; returns first broken link if any. */
 export async function verifyChain(tenantId: string): Promise<{ ok: boolean; brokenAt?: number }> {
-  const { rows } = await pool.query(
-    `SELECT id, hash, prev_hash, event_type, actor_id, at, meta FROM audit_events
-     WHERE tenant_id = $1 ORDER BY id ASC`, [tenantId],
-  );
+  const { rows } = await withTenant(tenantId, (client) =>
+    client.query(
+      `SELECT id, hash, prev_hash, event_type, actor_id, at, meta FROM audit_events
+       WHERE tenant_id = $1 ORDER BY id ASC`, [tenantId],
+    ));
   let prev = '0'.repeat(64);
   for (const r of rows) {
     const expect = chainHash(`${r.prev_hash}|${r.event_type}|${r.actor_id ?? 'anon'}|${new Date(r.at).toISOString()}|${r.meta ?? ''}`);

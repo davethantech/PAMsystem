@@ -32,15 +32,23 @@ npm run build                     # static production bundle
 ## Run the full stack (local)
 
 ```bash
-cd infrastructure && export COOKIE_SECRET=$(openssl rand -hex 32) && docker compose up --build
+bash infrastructure/dev/gen-certs.sh                       # self-signed PKI (dev only)
+export COOKIE_SECRET=$(openssl rand -hex 32)
+cd infrastructure && docker compose up --build             # migrations run at boot
+docker compose exec backend npm run seed                   # demo tenant + sealed vault
+node infrastructure/smoke.mjs                              # 14-step end-to-end gate
 ```
 
 ## Test the security model
 
 ```bash
-npx vitest run                    # engine: replay/IDOR/reveal/tenant/chain tests
-cd backend && npm i && npm test   # API: inject()-based security suite
+npx vitest run tests/             # engine: replay/IDOR/reveal/tenant/chain tests
+cd backend && npm i && npm test   # API suite (needs Postgres+Redis, e.g. via compose)
 ```
+
+CI (`.github/workflows/ci.yml`) runs all of the above plus backend compile,
+migrate + seed against service containers, `go vet` + connector build, and the
+extension typecheck/bundle.
 
 ## The one rule
 

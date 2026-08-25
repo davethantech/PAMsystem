@@ -1,0 +1,96 @@
+# Keyrail CI — security-first gates.
+# Console + engine security suite → backend (compile + migrate + seed + API
+# security suite against real Postgres/Redis) → connector (vet + build) →
+# extension (bundle + typecheck). Smoke against the live stack runs in deploy.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  console-and-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Engine security suite (replay · IDOR · reveal · tenant · chain)
+        run: npx vitest run tests/
+      - name: Build console
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with: { name: console-dist, path: dist, retention-days: 14 }
+
+  backend:
+    runs-on: ubuntu-latest
+    needs: console-and-engine
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: keyrail
+          POSTGRES_PASSWORD: keyrail
+          POSTGRES_DB: keyrail_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U keyrail"
+          --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://keyrail:keyrail@localhost:5432/keyrail_test
+      REDIS_URL: redis://localhost:6379
+      KMS_PROVIDER: local
+      ISSUER: https://pam.ci.local
+      COOKIE_SECRET: ci-only-0000000000000000000000000000000000000000000000000000000000000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - name: Compile (strict TS)
+        run: npm run build
+      - name: Migrate schema
+        run: node dist/db.js --migrate
+      - name: Seed dev tenant
+        run: node dist/seed.js
+      - name: API security suite (inject-based, live Postgres + Redis)
+        run: npx vitest run
+
+  connector:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: connector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - run: go mod tidy
+      - run: go vet ./...
+      - run: CGO_ENABLED=0 go build -trimpath -o /tmp/keyrail-connector .
+
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: browser-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with: { name: browser-connector, path: browser-extension/dist, retention-days: 14 }

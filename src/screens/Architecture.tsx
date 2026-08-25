@@ -226,8 +226,9 @@ export default function Architecture() {
                   ['database/', 'PostgreSQL migrations — 24 tables, UUIDs, FORCE row-level security per tenant'],
                   ['browser-extension/', 'Manifest V3 connector — domain allowlist, isolated-world injection, memory-only grants'],
                   ['connector/', 'Go on-prem bridge — outbound-only mTLS, command + target allowlists, chained local audit'],
-                  ['infrastructure/', 'docker-compose dev topology + production k8s manifests (NetworkPolicy default-deny, HPA, PITR)'],
+                  ['infrastructure/', 'docker-compose dev topology + production k8s manifests (NetworkPolicy default-deny, HPA, PITR) + smoke.mjs end-to-end gate + dev PKI generator'],
                   ['tests/ + backend/tests/', 'Vitest security suites — replay, IDOR, reveal, tenant isolation, chain integrity, cookie hardening'],
+                  ['.github/workflows/', 'CI: engine suite → backend compile + migrate + seed + API suite on real Postgres/Redis → connector vet/build → extension bundle'],
                   ['docs/', 'Architecture, 15-threat model, API reference (incl. the routes that do not exist), deployment & DR runbook'],
                 ].map(([p, s]) => <li key={p} className="flex gap-2.5"><span className="text-[var(--teal)] shrink-0 mt-0.5"><I n="check" className="w-3.5 h-3.5" sw={2.4} /></span><span><span className="font-mono text-[11.5px] text-[var(--teal)]">{p}</span> {s}</span></li>)}
               </ul>
@@ -239,8 +240,8 @@ export default function Architecture() {
                   'Provision a cloud account: VPC subnets, RDS multi-AZ, Redis HA, and an HSM-backed KMS master key per tenant',
                   'Key ceremony + secret-manager wiring (External Secrets Operator) — no plaintext config anywhere',
                   'This console still simulates the cloud in-browser (demo auth shows the TOTP code); point it at the real API to go live',
-                  'Independent penetration test and the quarterly red-team script from the deployment guide',
-                  'CI/CD pipelines, monitoring/alerting, and the DR game-day before first customer data',
+                  'First green CI run + `node infrastructure/smoke.mjs` against the booted compose stack (the deploy gate)',
+                  'Independent penetration test, monitoring/alerting, and the DR game-day before first customer data',
                 ].map((s) => <li key={s} className="flex gap-2.5"><span className="text-[var(--amber)] shrink-0 mt-0.5"><I n="alert" className="w-3.5 h-3.5" /></span>{s}</li>)}
               </ul>
             </div>

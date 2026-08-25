@@ -14,7 +14,7 @@ import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { jwtVerify } from 'jose';
-import { cfg, pool, withTenant, HttpError } from './db.js';
+import { cfg, pool, redis, withTenant, HttpError } from './db.js';
 import { audit, verifyChain, type AuditType } from './audit.js';
 import { establishSession, rotateRefresh, passwordLogin, oidcCallback, totpValid, type Principal } from './auth.js';
 import { createCredential, issueLaunchGrant, consumeGrant, attemptReveal, breakGlass, rotateCredential, rotateTenantKeys } from './vault.js';
@@ -30,20 +30,25 @@ async function principal(req: FastifyRequest): Promise<Principal> {
   try {
     ({ payload } = await jwtVerify(access, jwtSecret, { issuer: cfg.issuer }));
   } catch { throw new HttpError(401, 'TOKEN_INVALID', 'Access token failed signature/expiry check'); }
-  const { rows } = await pool.query(
-    `SELECT u.id, u.tenant_id, u.email, u.name, r.name AS role
-       FROM users u LEFT JOIN user_roles ur ON ur.user_id = u.id
-       LEFT JOIN roles r ON r.id = ur.role_id WHERE u.id = $1 AND u.status='ACTIVE'`,
-    [payload.sub]);
-  if (!rows.length) throw new HttpError(401, 'SESSION_REVOKED', 'Session revoked');
-  const u = rows[0];
-  const { rows: perms } = await pool.query(
-    `SELECT DISTINCT p.name FROM permissions p JOIN role_permissions rp ON rp.permission_id=p.id
-       JOIN user_roles ur ON ur.role_id=rp.role_id WHERE ur.user_id=$1`, [u.id]);
-  return {
-    userId: u.id, tenantId: u.tenant_id, email: u.email, name: u.name, role: u.role ?? 'USER',
-    sessionId: payload.sid!, authMethod: 'cookie', permissions: perms.map((r: { name: string }) => r.name),
-  };
+  const tenantId = payload.tenant;
+  if (!tenantId || !payload.sub || !payload.sid) throw new HttpError(401, 'TOKEN_INVALID', 'Malformed token');
+  // users/roles are RLS-FORCED → resolve the principal inside a tenant-pinned tx
+  return withTenant(tenantId, async (c) => {
+    const { rows } = await c.query(
+      `SELECT u.id, u.tenant_id, u.email, u.name, r.name AS role
+         FROM users u LEFT JOIN user_roles ur ON ur.user_id = u.id
+         LEFT JOIN roles r ON r.id = ur.role_id WHERE u.id = $1 AND u.status='ACTIVE'`,
+      [payload.sub]);
+    if (!rows.length) throw new HttpError(401, 'SESSION_REVOKED', 'Session revoked');
+    const u = rows[0];
+    const { rows: perms } = await c.query(
+      `SELECT DISTINCT p.name FROM permissions p JOIN role_permissions rp ON rp.permission_id=p.id
+         JOIN user_roles ur ON ur.role_id=rp.role_id WHERE ur.user_id=$1`, [u.id]);
+    return {
+      userId: u.id, tenantId: u.tenant_id, email: u.email, name: u.name, role: u.role ?? 'USER',
+      sessionId: payload.sid!, authMethod: 'cookie', permissions: perms.map((r: { name: string }) => r.name),
+    };
+  });
 }
 
 function require(p: Principal, perm: string) {
@@ -70,7 +75,6 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof HttpError) return reply.status(err.status).send({ error: err.code, message: err.message, auditId: err.auditId });
-    req => req; // eslint guard
     app.log.error({ err: { message: err.message } }, 'unhandled'); // never log raw bodies
     return reply.status(500).send({ error: 'INTERNAL', message: 'Internal error' });
   });
@@ -85,7 +89,16 @@ export async function buildApp(): Promise<FastifyInstance> {
     const ip = req.ip;
     const { user, role, mfaRequired } = await passwordLogin(body.tenant, body.email, body.password, ip);
     if (!mfaRequired) { await establishSession(user, role, 'PASSWORD', reply); return { ok: true }; }
-    return { mfaRequired: true, mfaToken: randomToken(12), user: { name: user.name } }; // challenge id; TOTP verified next
+    // persist the MFA challenge server-side (5-min TTL) — the client only ever sees the token
+    const mm = await withTenant(user.tenant_id, (c) =>
+      c.query(`SELECT convert_from(secret_enc, 'utf8') AS secret FROM mfa_methods WHERE user_id = $1 AND kind = 'TOTP' LIMIT 1`, [user.id]));
+    const secret = mm.rows[0]?.secret;
+    if (!secret) throw new HttpError(412, 'MFA_NOT_ENROLLED', 'No TOTP method enrolled for this user');
+    const mfaToken = randomToken(12);
+    await redis.set(`mfa:${mfaToken}`, JSON.stringify({
+      secret, userId: user.id, tenantId: user.tenant_id, email: user.email, name: user.name, role,
+    }), 'EX', 300);
+    return { mfaRequired: true, mfaToken, user: { name: user.name } };
   });
 
   app.post('/auth/mfa', async (req, reply) => {
@@ -172,6 +185,20 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
   });
 
+  /* ---------------- applications (metadata for the launcher) ---------------- */
+  app.get('/applications', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT a.id, a.name, a.kind, a.domain, a.url, a.auth_flow, a.via_connector,
+                ac.credential_id
+           FROM applications a
+           LEFT JOIN application_credentials ac ON ac.application_id = a.id
+          ORDER BY a.name`);
+      return rows; // selectors stay server-side; the connector receives them per-grant only
+    });
+  });
+
   /* --- the anti-endpoint: anything resembling plaintext retrieval is a probe --- */
   app.all('/credentials/:id/secret', async (req) => {
     const p = await principal(req).catch(() => null);
@@ -238,12 +265,13 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.get('/sessions', async (req) => {
     const p = await principal(req);
     return withTenant(p.tenantId, async (c) => {
-      const mine = p.permissions.includes('session.terminate') ? '' : `AND s.user_id = '${p.userId}'`;
+      const admin = p.permissions.includes('session.terminate') || p.permissions.includes('*');
       const { rows } = await c.query(
         `SELECT s.id, u.name AS "user", a.name AS app, s.gateway, s.source_ip::text, s.status,
                 s.started_at, s.expires_at, s.recording
            FROM sessions s LEFT JOIN users u ON u.id=s.user_id LEFT JOIN applications a ON a.id=s.application_id
-          WHERE s.tenant_id=$1 ${mine} ORDER BY s.started_at DESC LIMIT 200`, [p.tenantId]);
+          WHERE s.tenant_id=$1 AND ($2::boolean OR s.user_id = $3::uuid)
+          ORDER BY s.started_at DESC LIMIT 200`, [p.tenantId, admin, p.userId]);
       return rows;
     });
   });
