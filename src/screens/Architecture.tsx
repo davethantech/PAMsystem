@@ -209,6 +209,47 @@ export default function Architecture() {
         </div>
       </Reveal>
 
+      <Reveal>
+        <div className="panel overflow-hidden" style={{ borderColor: 'rgba(58,214,181,0.3)' }}>
+          <div className="px-5 py-4 border-b border-[var(--line)] flex flex-wrap items-center gap-3">
+            <I n="radar" className="w-4 h-4 text-[var(--teal)]" />
+            <h2 className="font-display font-bold text-[17px]">Deployment readiness — honest status</h2>
+            <Chip tone="teal">THIS BUILD · static prototype</Chip>
+            <span className="font-mono text-[10.5px] text-[var(--dim)]">npm run build → dist/ → any CDN or static host</span>
+          </div>
+          <div className="grid md:grid-cols-2">
+            <div className="p-5 border-b md:border-b-0 md:border-r border-[var(--line)]">
+              <div className="font-mono text-[10px] tracking-[0.2em] text-[var(--teal)] mb-3">FUNCTIONAL IN THIS BUILD</div>
+              <ul className="space-y-2.5 text-[12.5px] text-[var(--mut)] leading-snug">
+                {[
+                  'End-to-end workflow: SSO/TOTP → RBAC → single-use 30s grant → injection → proxied session → auto-expiry',
+                  'Enforcement at the module boundary — no exported code path returns plaintext; every abuse attempt is denied & audited',
+                  'Hash-chained tamper-evident audit log with integrity verification & export',
+                  'JIT approval flow, rotation engine, tenant/collection scoping, persona-based role testing',
+                  'Interactive architecture map, threat model, and live adversarial probe harness',
+                ].map((s) => <li key={s} className="flex gap-2.5"><span className="text-[var(--teal)] shrink-0 mt-0.5"><I n="check" className="w-3.5 h-3.5" sw={2.4} /></span>{s}</li>)}
+              </ul>
+            </div>
+            <div className="p-5">
+              <div className="font-mono text-[10px] tracking-[0.2em] text-[var(--amber)] mb-3">REQUIRED FOR PRODUCTION SAAS</div>
+              <ul className="space-y-2.5 text-[12.5px] text-[var(--mut)] leading-snug">
+                {[
+                  'Real backend service (NestJS/Go/FastAPI) — auth here is simulated and the demo shows the TOTP code on screen',
+                  'PostgreSQL + migrations, Redis, enforced multi-tenant row-level isolation',
+                  'Cloud KMS/HSM — secrets currently live in JS memory; only a server-side vault makes exfiltration cryptographically impossible against DevTools on the same origin',
+                  'Browser extension (MV3), SSH/RDP session gateway, and on-prem connector as real binaries',
+                  'Docker / Kubernetes manifests, CI/CD, monitoring, DR runbooks, and the automated security test suite',
+                ].map((s) => <li key={s} className="flex gap-2.5"><span className="text-[var(--amber)] shrink-0 mt-0.5"><I n="alert" className="w-3.5 h-3.5" /></span>{s}</li>)}
+              </ul>
+            </div>
+          </div>
+          <div className="px-5 py-3 border-t border-[var(--line)] font-mono text-[10.5px] text-[var(--dim)]">
+            verdict: <span className="text-[var(--teal)]">ship today</span> as an eval / demo / interactive architecture reference ·
+            <span className="text-[var(--amber)]"> not yet</span> a system to hand real enterprise credentials to
+          </div>
+        </div>
+      </Reveal>
+
       <div className="grid lg:grid-cols-3 gap-4">
         <Reveal>
           <div className="panel p-5 h-full">
