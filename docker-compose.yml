@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: keyrail
+      POSTGRES_USER: keyrail
+      POSTGRES_PASSWORD: keyrail
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keyrail"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://keyrail:keyrail@postgres:5432/keyrail
+      - REDIS_URL=redis://redis:6379
+      - PG_SSL=false
+      - KMS_PROVIDER=local
+      - COOKIE_SECRET=dev-cookie-secret-change-me-please-use-long-secret
+      - PRODUCTION=false
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/usr/src/app
+
+volumes:
+  db_data:
+  redis_data:
