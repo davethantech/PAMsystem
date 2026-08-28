@@ -6,8 +6,8 @@
  */
 import { PamProvider, usePam } from './state/store-new';
 import Setup from './screens/Setup';
-import Login from './screens/Login';
-import Shell, { ToastHost } from './screens/Shell';
+import Login from './screens/Login-new';
+import Shell, { ToastHost } from './screens/Shell-new';
 import Dashboard from './screens/Dashboard';
 import Launcher, { TargetSessionOverlay } from './screens/Launcher';
 import Vault from './screens/Vault';
