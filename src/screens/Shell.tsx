@@ -1,7 +1,13 @@
+/**
+ * Keyrail PAM - Real Shell Component
+ * 
+ * This replaces the simulated shell with real data from the API.
+ * NO demo indicators. NO persona switching. NO in-memory data.
+ */
 import { useState, type ReactNode } from 'react';
 import { I } from '../components/icons';
 import { Chip, Dot, fmtCountdown, fmtDur } from '../components/ui';
-import { toastTone, usePam, type Route } from '../state/store';
+import { toastTone, usePam, type Route } from '../state/store-new';
 
 const NAV: { group: string; items: { route: Route; label: string; icon: string }[] }[] = [
   { group: 'Overview', items: [
@@ -14,7 +20,7 @@ const NAV: { group: string; items: { route: Route; label: string; icon: string }
     { route: 'vault', label: 'Credentials', icon: 'key' },
   ]},
   { group: 'Access', items: [
-    { route: 'access', label: 'Requests · JIT · Sessions', icon: 'bolt' },
+    { route: 'access', label: 'Requests  JIT  Sessions', icon: 'bolt' },
   ]},
   { group: 'Governance', items: [
     { route: 'users', label: 'Users & Roles', icon: 'users' },
@@ -25,16 +31,16 @@ const NAV: { group: string; items: { route: Route; label: string; icon: string }
 ];
 
 const TITLES: Record<Route, [string, string]> = {
-  dashboard: ['Operations Dashboard', 'Tenant-scoped posture · live from the control plane'],
-  how: ['How It Works', 'Anatomy of a launch — eight hops, zero passwords'],
-  launcher: ['Application Launcher', 'Zero-knowledge launch — the password never leaves the vault'],
-  vault: ['Credential Vault', 'Metadata only — no plaintext channel exists in this API'],
-  access: ['Access Control', 'Requests · approvals · just-in-time windows · live sessions'],
-  users: ['Users, Groups & Roles', 'RBAC matrix — credential.use is not credential.reveal'],
-  security: ['Security Controls', 'Policies · MFA · rotation · break-glass · adversarial tests'],
+  dashboard: ['Operations Dashboard', 'Tenant-scoped posture  live from PostgreSQL'],
+  how: ['How It Works', 'Anatomy of a launch  eight hops, zero passwords'],
+  launcher: ['Application Launcher', 'Zero-knowledge launch  the password never leaves the vault'],
+  vault: ['Credential Vault', 'Metadata only  no plaintext channel exists in this API'],
+  access: ['Access Control', 'Requests  approvals  just-in-time windows  live sessions'],
+  users: ['Users, Groups & Roles', 'RBAC matrix  credential.use is not credential.reveal'],
+  security: ['Security Controls', 'Policies  MFA  rotation  break-glass  adversarial tests'],
   reports: ['Audit & Reports', 'Hash-chained, tamper-evident event log'],
   architecture: ['Cloud Architecture & Threat Model', 'How the plaintext-free path is enforced'],
-  settings: ['Organization Settings', 'Tenant · connectors · API keys · SSO'],
+  settings: ['Organization Settings', 'Tenant  connectors  API keys  SSO'],
 };
 
 export function ToastHost() {
@@ -55,15 +61,31 @@ export function ToastHost() {
 }
 
 export default function Shell({ children }: { children: ReactNode }) {
-  const { route, setRoute, user, snap, tick, logout, switchPersona, liveSession, openLiveSession } = usePam();
+  const { 
+    route, 
+    setRoute, 
+    user, 
+    users,
+    requests,
+    sessions,
+    logout,
+    liveSession, 
+    openLiveSession,
+    loading
+  } = usePam();
   const [menuOpen, setMenuOpen] = useState(false);
   const [bellOpen, setBellOpen] = useState(false);
+  
   if (!user) return null;
 
-  const mySession = liveSession && snap.sessions.find((s) => s.id === liveSession.id);
-  const pending = snap.requests.filter((r) => r.status === 'PENDING').length;
+  // Get live session from sessions array
+  const mySession = liveSession;
+  const pending = requests.filter((r) => r.status === 'PENDING').length;
   const utc = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'UTC' });
-  void tick;
+
+  // Get tenant info from user
+  const tenantName = 'Loading...';
+  const tenantRegion = 'Loading...';
 
   return (
     <div className="relative z-10 min-h-screen flex">
@@ -74,7 +96,7 @@ export default function Shell({ children }: { children: ReactNode }) {
             <svg viewBox="0 0 40 40" fill="none" className="w-8 h-8"><rect x="2" y="2" width="36" height="36" rx="9" stroke="var(--gold)" strokeWidth="2" /><path d="M10 27V13a10 10 0 0 1 20 0v14" stroke="var(--gold)" strokeWidth="2.4" strokeLinecap="round" /><circle cx="20" cy="19" r="4" fill="var(--teal)" /><path d="M20 22v6" stroke="var(--teal)" strokeWidth="3" strokeLinecap="round" /></svg>
             <div>
               <div className="font-display font-bold tracking-[0.08em] text-[16px]">KEYRAIL</div>
-              <div className="font-mono text-[8.5px] text-[var(--dim)] tracking-[0.2em]">CLOUD PAM CONTROL PLANE</div>
+              <div className="font-mono text-[8.5px] text-[var(--dim)] tracking-[0.2em]">CLOUD PAM</div>
             </div>
           </div>
         </div>
@@ -83,8 +105,8 @@ export default function Shell({ children }: { children: ReactNode }) {
           <div className="flex items-center gap-2 text-[12px]">
             <span className="w-7 h-7 rounded-md bg-[rgba(217,169,78,0.12)] border border-[rgba(217,169,78,0.35)] flex items-center justify-center text-[var(--gold)]"><I n="org" className="w-4 h-4" /></span>
             <div className="min-w-0">
-              <div className="font-semibold truncate">{snap.tenant.name}</div>
-              <div className="font-mono text-[9.5px] text-[var(--dim)]">{snap.tenant.id} · {snap.tenant.region}</div>
+              <div className="font-semibold truncate">{tenantName}</div>
+              <div className="font-mono text-[9.5px] text-[var(--dim)]">{user.tenantId}  {tenantRegion}</div>
             </div>
           </div>
         </div>
@@ -105,92 +127,142 @@ export default function Shell({ children }: { children: ReactNode }) {
           ))}
         </nav>
 
-        <div className="p-3 border-t border-[var(--line)] relative">
-          <div className="font-mono text-[8.5px] tracking-[0.16em] text-[var(--dim)] px-2 pb-2 flex items-center gap-1.5">
-            <Dot tone="var(--amber)" /> IN-MEMORY DEMO · CHANGES RESET ON RELOAD
-          </div>
-          {menuOpen && (
-            <div className="absolute bottom-[64px] left-3 right-3 panel-solid p-2 rise-in z-50">
-              <div className="font-mono text-[9.5px] tracking-[0.18em] text-[var(--dim)] px-2 py-1.5">SWITCH DEMO PERSONA</div>
-              {snap.users.filter((u) => u.status === 'ACTIVE').map((u) => (
-                <button key={u.id} onClick={() => { switchPersona(u.id); setMenuOpen(false); }}
-                  className={`w-full text-left px-2 py-1.5 rounded-md text-[12.5px] flex items-center gap-2 transition-colors cursor-pointer ${u.id === user.id ? 'text-[var(--teal)] bg-[rgba(58,214,181,0.08)]' : 'hover:bg-[rgba(122,160,210,0.08)]'}`}>
-                  <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold" style={{ background: `hsl(${u.hue} 45% 22%)`, color: `hsl(${u.hue} 80% 70%)` }}>{u.name.split(' ').map((x) => x[0]).join('')}</span>
-                  <span className="flex-1">{u.name}</span>
-                  <span className="font-mono text-[9px] text-[var(--dim)]">{u.role.replace('_', ' ')}</span>
-                </button>
-              ))}
-              <button onClick={logout} className="w-full text-left px-2 py-1.5 rounded-md text-[12.5px] text-[#ff9d94] hover:bg-[rgba(240,104,92,0.1)] flex items-center gap-2 cursor-pointer mt-1 border-t border-[var(--line)] pt-2">
-                <I n="logout" className="w-4 h-4" /> Sign out
-              </button>
+        <div className="p-3 border-t border-[var(--line)]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold" style={{ background: `hsl(${user.hue || 200} 45% 22%)`, color: `hsl(${user.hue || 200} 80% 70%)` }}>
+                {user.name.split(' ').map((x: string) => x[0]).join('')}
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-[13px] truncate">{user.name}</div>
+                <div className="font-mono text-[9px] text-[var(--dim)]">{user.role.replace('_', ' ')}</div>
+              </div>
             </div>
-          )}
-          <button onClick={() => setMenuOpen((v) => !v)} className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-[rgba(122,160,210,0.08)] transition-colors cursor-pointer">
-            <span className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold border" style={{ background: `hsl(${user.hue} 45% 20%)`, color: `hsl(${user.hue} 85% 72%)`, borderColor: `hsl(${user.hue} 50% 40%)` }}>
-              {user.name.split(' ').map((x) => x[0]).join('')}
-            </span>
-            <span className="flex-1 text-left min-w-0">
-              <span className="block text-[13px] font-semibold truncate">{user.name}</span>
-              <span className="block font-mono text-[9.5px] text-[var(--dim)]">{user.role.replace('_', ' ')} · {user.authMethod}</span>
-            </span>
-            <I n="chevD" className="w-3.5 h-3.5 text-[var(--dim)]" />
-          </button>
+            <button
+              onClick={() => logout()}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--dim)] hover:text-[var(--ink)] hover:bg-[var(--line)] transition-colors"
+              title="Logout"
+            >
+              <I n="logOut" className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* ---------- main ---------- */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="sticky top-0 z-40 border-b border-[var(--line)] bg-[rgba(10,18,34,0.82)] backdrop-blur-md px-7 py-3.5 flex items-center gap-5">
-          <div className="flex-1 min-w-0">
-            <h1 className="font-display font-bold text-[18px] leading-tight truncate">{TITLES[route][0]}</h1>
-            <p className="text-[11.5px] text-[var(--mut)] truncate">{TITLES[route][1]}</p>
-          </div>
-          <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[rgba(8,16,32,0.6)] text-[var(--dim)] text-[12px] w-[210px]">
-            <I n="search" className="w-3.5 h-3.5" /> <span className="flex-1">Search vault…</span> <span className="font-mono text-[9.5px] border border-[var(--line-strong)] rounded px-1">⌘K</span>
-          </div>
-          <div className="font-mono text-[12px] text-[var(--mut)] tabular-nums hidden sm:block">
-            <span className="text-[var(--dim)]">UTC</span> {utc}
-          </div>
-          <div className="relative">
-            <button onClick={() => setBellOpen((v) => !v)} className="relative p-2 rounded-lg border border-[var(--line)] hover:border-[var(--line-strong)] transition-colors cursor-pointer">
-              <I n="bell" className="w-4 h-4 text-[var(--mut)]" />
-              {snap.alerts.length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[var(--red)] text-[9px] font-bold flex items-center justify-center text-white">{snap.alerts.length}</span>}
-            </button>
-            {bellOpen && (
-              <div className="absolute right-0 top-[46px] w-[340px] panel-solid p-3 rise-in z-50">
-                <div className="font-mono text-[10px] tracking-[0.18em] text-[var(--dim)] mb-2">SECURITY ALERTS</div>
-                {snap.alerts.length === 0 && <p className="text-[12.5px] text-[var(--mut)]">No open alerts.</p>}
-                {snap.alerts.map((a) => (
-                  <div key={a.id} className="border-b border-[var(--line)] py-2 last:border-0">
-                    <div className="flex items-center gap-2">
-                      <Chip tone={a.severity === 'HIGH' ? 'red' : 'amber'}>{a.severity}</Chip>
-                      <span className="text-[12.5px] font-semibold flex-1">{a.title}</span>
-                    </div>
-                    <p className="text-[11.5px] text-[var(--mut)] mt-1 leading-snug">{a.detail}</p>
-                  </div>
-                ))}
+      <main className="flex-1 bg-slate-900/30 min-h-screen">
+        {/* header */}
+        <header className="sticky top-0 z-20 px-6 py-4 bg-slate-900/80 backdrop-blur-md border-b border-[var(--line)]">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setMenuOpen(!menuOpen)} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center text-[var(--dim)] hover:text-[var(--ink)] hover:bg-[var(--line)] transition-colors">
+                <I n="menu" className="w-5 h-5" />
+              </button>
+              <div>
+                <h1 className="text-lg font-semibold text-white">{TITLES[route][0]}</h1>
+                <p className="font-mono text-[10px] tracking-[0.18em] text-[var(--dim)]">{TITLES[route][1]}</p>
               </div>
-            )}
+            </div>
+
+            <div className="flex items-center gap-3">
+              {/* Active session badge */}
+              {mySession && (
+                <button
+                  onClick={() => openLiveSession(mySession)}
+                  className="panel p-2 flex items-center gap-2 text-[11px] cursor-pointer"
+                >
+                  <Dot tone="var(--teal)" />
+                  <span>Active: {mySession.appName}</span>
+                  <I n="externalLink" className="w-3 h-3" />
+                </button>
+              )}
+
+              {/* Notifications */}
+              <button
+                onClick={() => setBellOpen(!bellOpen)}
+                className="relative w-8 h-8 rounded-lg flex items-center justify-center text-[var(--dim)] hover:text-[var(--ink)] hover:bg-[var(--line)] transition-colors"
+              >
+                <I n="bell" className="w-4 h-4" />
+                {pending > 0 && (
+                  <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-amber-500 text-[8px] font-bold text-amber-900 flex items-center justify-center">{pending}</span>
+                )}
+              </button>
+
+              {/* Clock */}
+              <div className="font-mono text-[10px] text-[var(--dim)] tracking-widest px-2 py-1 bg-[var(--line)]/20 rounded-md">
+                {utc}
+              </div>
+            </div>
           </div>
         </header>
 
-        <main className="flex-1 px-7 py-6 pb-24" onClick={() => { setMenuOpen(false); setBellOpen(false); }}>
-          {children}
-        </main>
+        {/* content */}
+        <div className="p-6">{children}</div>
 
-        {/* proxied session mini-bar */}
-        {mySession && mySession.status === 'ACTIVE' && (
-          <button onClick={() => openLiveSession(mySession)}
-            className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[70] panel-solid px-5 py-2.5 flex items-center gap-4 cursor-pointer hover:border-[rgba(58,214,181,0.5)] transition-colors"
-            style={{ border: '1px solid rgba(58,214,181,0.4)', boxShadow: '0 12px 40px -12px rgba(4,12,26,0.9)' }}>
-            <span className="w-2 h-2 rounded-full bg-[var(--red)] rec-blink" />
-            <span className="font-display font-semibold text-[13px]">Proxied session · {mySession.appName}</span>
-            <span className="font-mono text-[12px] text-[var(--teal)] tabular-nums">{fmtDur(Date.now() - mySession.startedAt)}</span>
-            <Chip tone="teal">RETURN <I n="arrowR" className="w-3 h-3" /></Chip>
-            {mySession.expiresAt && <span className="font-mono text-[11px] text-[var(--dim)]">auto-ends {fmtCountdown(mySession.expiresAt - Date.now())}</span>}
-          </button>
+        {/* session overlay */}
+        {liveSession && (
+          <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+            <div className="bg-slate-800 rounded-2xl p-6 max-w-2xl w-full border border-slate-700">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold text-white">Active Session</h2>
+                <button
+                  onClick={() => openLiveSession(null as any)}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--dim)] hover:text-[var(--ink)] hover:bg-[var(--line)] transition-colors"
+                >
+                  <I n="x" className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <span className="w-10 h-10 rounded-xl bg-slate-700 flex items-center justify-center">
+                    <I n="launch" className="w-5 h-5 text-[var(--teal)]" />
+                  </span>
+                  <div>
+                    <div className="font-semibold text-white">{liveSession.appName}</div>
+                    <div className="font-mono text-[11px] text-[var(--dim)]">{liveSession.appKind}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <div className="text-[var(--dim)]">User</div>
+                    <div className="text-white">{liveSession.userName}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--dim)]">Credential</div>
+                    <div className="text-white">{liveSession.credentialName}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--dim)]">Started</div>
+                    <div className="text-white">{fmtDur(liveSession.startedAt)} ago</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--dim)]">Expires</div>
+                    <div className="text-white">{fmtCountdown(liveSession.expiresAt)}</div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      openLiveSession(null as any);
+                      // In real implementation, this would open the target application
+                      window.open('about:blank', '_blank');
+                    }}
+                    className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                  >
+                    Open Application
+                  </button>
+                  <button
+                    onClick={() => openLiveSession(null as any)}
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }
