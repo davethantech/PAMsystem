@@ -176,6 +176,280 @@ export async function buildApp(): Promise<FastifyInstance> {
     const p = await principal(req);
     return { id: p.userId, name: p.name, email: p.email, role: p.role, tenantId: p.tenantId, permissions: p.permissions };
   });
+  /* ---------------- users ---------------- */
+  app.get('/users', async (req) => {
+    const p = await principal(req);
+    require(p, 'user.create');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, email, name, title, status, mfa_required, last_login_at, created_at
+           FROM users WHERE deleted_at IS NULL ORDER BY name`);
+      return rows;
+    });
+  });
+
+  app.post('/users', async (req) => {
+    const p = await principal(req);
+    require(p, 'user.create');
+    const body = z.object({
+      email: z.string().email(),
+      name: z.string().min(2).max(120),
+      title: z.string().max(120).optional(),
+      role: z.string().min(2).max(40),
+      collectionIds: z.array(z.string().uuid()).default([]),
+      password: z.string().min(12).max(128).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      // Check if user exists
+      const { rows: existing } = await c.query(
+        `SELECT id FROM users WHERE tenant_id = $1 AND email = $2`,
+        [p.tenantId, body.email.trim().toLowerCase()]);
+      if (existing.length > 0) {
+        throw new HttpError(409, 'USER_EXISTS', 'User with this email already exists');
+      }
+      // Get role ID
+      const { rows: roleRows } = await c.query(
+        `SELECT id FROM roles WHERE name = $1 AND (tenant_id IS NULL OR tenant_id = $2)`,
+        [body.role, p.tenantId]);
+      if (roleRows.length === 0) {
+        throw new HttpError(400, 'INVALID_ROLE', 'Role does not exist');
+      }
+      const roleId = roleRows[0].id;
+      // Hash password if provided
+      let passwordHash = null;
+      if (body.password) {
+        const argon2 = await import('argon2');
+        passwordHash = await argon2.hash(body.password);
+      }
+      // Create user
+      const { rows: userRows } = await c.query(
+        `INSERT INTO users (tenant_id, email, name, title, password_hash, status, mfa_required)
+         VALUES ($1, $2, $3, $4, $5, 'ACTIVE', true)
+         RETURNING id`,
+        [p.tenantId, body.email.trim().toLowerCase(), body.name.trim(), body.title?.trim() || null, passwordHash]);
+      const userId = userRows[0].id;
+      // Assign role
+      await c.query(
+        `INSERT INTO user_roles (user_id, role_id, granted_by) VALUES ($1, $2, $3)`,
+        [userId, roleId, p.userId]);
+      // Add to collections
+      for (const colId of body.collectionIds) {
+        await c.query(
+          `INSERT INTO collection_members (collection_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [colId, userId]);
+      }
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'USER_CREATED', resourceId: userId, resourceName: body.name, meta: `role=${body.role}` });
+      return { id: userId };
+    });
+  });
+
+  app.get('/users/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'user.create');
+    const { id } = req.params as { id: string };
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, email, name, title, status, mfa_required, last_login_at, created_at
+           FROM users WHERE id = $1 AND deleted_at IS NULL`,
+        [id]);
+      if (rows.length === 0) throw new HttpError(404, 'USER_NOT_FOUND', 'User not found');
+      // Get user's roles
+      const { rows: roleRows } = await c.query(
+        `SELECT r.name as role FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
+        [id]);
+      // Get user's collections
+      const { rows: colRows } = await c.query(
+        `SELECT collection_id as id FROM collection_members WHERE user_id = $1`,
+        [id]);
+      return {
+        ...rows[0],
+        roles: roleRows.map((r: any) => r.role),
+        collectionIds: colRows.map((c: any) => c.id),
+      };
+    });
+  });
+
+  app.patch('/users/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'user.create');
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      name: z.string().min(2).max(120).optional(),
+      title: z.string().max(120).optional(),
+      status: z.enum(['ACTIVE', 'DISABLED']).optional(),
+      collectionIds: z.array(z.string().uuid()).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows: existing } = await c.query(
+        `SELECT tenant_id FROM users WHERE id = $1 AND deleted_at IS NULL`,
+        [id]);
+      if (existing.length === 0) throw new HttpError(404, 'USER_NOT_FOUND', 'User not found');
+      if (existing[0].tenant_id !== p.tenantId) throw new HttpError(403, 'FORBIDDEN', 'Cross-tenant access denied');
+      const updates: string[] = [];
+      const values: (string | null)[] = [];
+      let paramIdx = 1;
+      if (body.name !== undefined) { updates.push(`name = $${paramIdx++}`); values.push(body.name.trim()); }
+      if (body.title !== undefined) { updates.push(`title = $${paramIdx++}`); values.push(body.title?.trim() || null); }
+      if (body.status !== undefined) { updates.push(`status = $${paramIdx++}`); values.push(body.status); }
+      values.push(id);
+      if (updates.length > 0) {
+        await c.query(
+          `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIdx}`,
+          values);
+      }
+      // Update collections
+      if (body.collectionIds !== undefined) {
+        await c.query(`DELETE FROM collection_members WHERE user_id = $1`, [id]);
+        for (const colId of body.collectionIds) {
+          await c.query(
+            `INSERT INTO collection_members (collection_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [colId, id]);
+        }
+      }
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'USER_UPDATED', resourceId: id, meta: Object.keys(body).join(',') });
+      return { ok: true };
+    });
+  });
+
+  app.delete('/users/:id', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'user.disable');
+    const { id } = req.params as { id: string };
+    return withTenant(p.tenantId, async (c) => {
+      const { rows: existing } = await c.query(
+        `SELECT tenant_id FROM users WHERE id = $1 AND deleted_at IS NULL`,
+        [id]);
+      if (existing.length === 0) throw new HttpError(404, 'USER_NOT_FOUND', 'User not found');
+      if (existing[0].tenant_id !== p.tenantId) throw new HttpError(403, 'FORBIDDEN', 'Cross-tenant access denied');
+      await c.query(
+        `UPDATE users SET deleted_at = now(), status = 'DISABLED' WHERE id = $1`,
+        [id]);
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'USER_DELETED', resourceId: id });
+      return { ok: true };
+    });
+  });
+
+  /* ---------------- collections ---------------- */
+  app.get('/collections', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, name, description, created_at
+           FROM collections WHERE tenant_id = $1 ORDER BY name`,
+        [p.tenantId]);
+      const collections = await Promise.all(rows.map(async (col: any) => {
+        const { rows: members } = await c.query(
+          `SELECT user_id as id FROM collection_members WHERE collection_id = $1`,
+          [col.id]);
+        return { ...col, memberUserIds: members.map((m: any) => m.id) };
+      }));
+      return collections;
+    });
+  });
+
+  app.post('/collections', async (req) => {
+    const p = await principal(req);
+    require(p, 'policy.create');
+    const body = z.object({
+      name: z.string().min(2).max(120),
+      description: z.string().max(500).optional(),
+      memberUserIds: z.array(z.string().uuid()).default([]),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows: existing } = await c.query(
+        `SELECT id FROM collections WHERE tenant_id = $1 AND name = $2`,
+        [p.tenantId, body.name.trim()]);
+      if (existing.length > 0) {
+        throw new HttpError(409, 'COLLECTION_EXISTS', 'Collection with this name already exists');
+      }
+      const { rows: colRows } = await c.query(
+        `INSERT INTO collections (tenant_id, name, description)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [p.tenantId, body.name.trim(), body.description?.trim() || null]);
+      const collectionId = colRows[0].id;
+      for (const userId of body.memberUserIds) {
+        await c.query(
+          `INSERT INTO collection_members (collection_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [collectionId, userId]);
+      }
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_CREATED', resourceId: collectionId, resourceName: body.name, meta: `${body.memberUserIds.length} members` });
+      return { id: collectionId };
+    });
+  });
+
+  app.get('/collections/:id', async (req) => {
+    const p = await principal(req);
+    const { id } = req.params as { id: string };
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, name, description, created_at
+           FROM collections WHERE id = $1 AND tenant_id = $2`,
+        [id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      const { rows: members } = await c.query(
+        `SELECT user_id as id FROM collection_members WHERE collection_id = $1`,
+        [id]);
+      return { ...rows[0], memberUserIds: members.map((m: any) => m.id) };
+    });
+  });
+
+  app.patch('/collections/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'policy.create');
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      name: z.string().min(2).max(120).optional(),
+      description: z.string().max(500).optional(),
+      memberUserIds: z.array(z.string().uuid()).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows: existing } = await c.query(
+        `SELECT tenant_id FROM collections WHERE id = $1`,
+        [id]);
+      if (existing.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      if (existing[0].tenant_id !== p.tenantId) throw new HttpError(403, 'FORBIDDEN', 'Cross-tenant access denied');
+      const updates: string[] = [];
+      const values: (string | null)[] = [];
+      let paramIdx = 1;
+      if (body.name !== undefined) { updates.push(`name = $${paramIdx++}`); values.push(body.name.trim()); }
+      if (body.description !== undefined) { updates.push(`description = $${paramIdx++}`); values.push(body.description?.trim() || null); }
+      values.push(id);
+      if (updates.length > 0) {
+        await c.query(
+          `UPDATE collections SET ${updates.join(', ')} WHERE id = $${paramIdx}`,
+          values);
+      }
+      if (body.memberUserIds !== undefined) {
+        await c.query(`DELETE FROM collection_members WHERE collection_id = $1`, [id]);
+        for (const userId of body.memberUserIds) {
+          await c.query(
+            `INSERT INTO collection_members (collection_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [id, userId]);
+        }
+      }
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_UPDATED', resourceId: id, meta: Object.keys(body).join(',') });
+      return { ok: true };
+    });
+  });
+
+  app.delete('/collections/:id', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'policy.create');
+    const { id } = req.params as { id: string };
+    return withTenant(p.tenantId, async (c) => {
+      const { rows: existing } = await c.query(
+        `SELECT tenant_id FROM collections WHERE id = $1`,
+        [id]);
+      if (existing.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      if (existing[0].tenant_id !== p.tenantId) throw new HttpError(403, 'FORBIDDEN', 'Cross-tenant access denied');
+      await c.query(`DELETE FROM collections WHERE id = $1`, [id]);
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_DELETED', resourceId: id });
+      return { ok: true };
+    });
+  });
+
+
 
   /* ---------------- vault metadata (never secrets) ---------------- */
   app.get('/credentials', async (req) => {
