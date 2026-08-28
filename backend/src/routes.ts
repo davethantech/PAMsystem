@@ -449,6 +449,58 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
   });
 
+  /* ---------------- tenant info ---------------- */
+  app.get('/tenant', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, name, slug, region, plan, created_at FROM tenants WHERE id = $1`,
+        [p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'TENANT_NOT_FOUND', 'Tenant not found');
+      return rows[0];
+    });
+  });
+
+  /* ---------------- user roles ---------------- */
+  app.get('/roles', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT r.id, r.name, r.is_system, array_agg(p.name) as permissions
+           FROM roles r LEFT JOIN role_permissions rp ON rp.role_id = r.id
+           LEFT JOIN permissions p ON p.id = rp.permission_id
+           WHERE r.tenant_id IS NULL OR r.tenant_id = $1
+           GROUP BY r.id, r.name, r.is_system
+           ORDER BY r.name`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  /* ---------------- user count for dashboard ---------------- */
+  app.get('/dashboard/stats', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const [usersResult, credsResult, appsResult, sessionsResult, requestsResult, alertsResult] = await Promise.all([
+        c.query(`SELECT COUNT(*) as count FROM users WHERE deleted_at IS NULL`),
+        c.query(`SELECT COUNT(*) as count FROM credentials WHERE deleted_at IS NULL`),
+        c.query(`SELECT COUNT(*) as count FROM applications`),
+        c.query(`SELECT COUNT(*) as count FROM sessions WHERE status = 'ACTIVE'`),
+        c.query(`SELECT COUNT(*) as count FROM access_requests WHERE status = 'PENDING'`),
+        c.query(`SELECT COUNT(*) as count FROM audit_events WHERE event_type = 'RED_TEAM_PROBE' AND ts > now() - interval '24 hours'`),
+      ]);
+      return {
+        totalUsers: parseInt(usersResult.rows[0].count),
+        totalCredentials: parseInt(credsResult.rows[0].count),
+        totalApplications: parseInt(appsResult.rows[0].count),
+        activeSessions: parseInt(sessionsResult.rows[0].count),
+        pendingApprovals: parseInt(requestsResult.rows[0].count),
+        securityAlerts: parseInt(alertsResult.rows[0].count),
+      };
+    });
+  });
+
+
 
 
   /* ---------------- vault metadata (never secrets) ---------------- */
