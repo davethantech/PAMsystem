@@ -704,5 +704,461 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
   });
 
+
+  /* ---------------- applications ---------------- */
+  app.get('/applications', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at 
+           FROM applications WHERE tenant_id = $1 ORDER BY name`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  app.post('/applications', async (req) => {
+    const p = await principal(req);
+    require(p, 'application.create');
+    const body = z.object({
+      name: z.string().min(2).max(120),
+      description: z.string().max(500).optional(),
+      kind: z.enum(['WEB', 'SSH', 'RDP', 'DB', 'API']),
+      targetUrl: z.string().url().optional(),
+      collectionId: z.string().uuid().optional(),
+      credentialId: z.string().uuid().optional(),
+      accessPolicy: z.enum(['DIRECT', 'APPROVAL_REQUIRED', 'JIT']).default('DIRECT'),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO applications (tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
+           RETURNING id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at`,
+        [p.tenantId, body.name, body.description, body.kind, body.targetUrl, body.collectionId, body.credentialId, body.accessPolicy]);
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'APPLICATION_CREATED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.get('/applications/:id', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at 
+           FROM applications WHERE id = $1 AND tenant_id = $2`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'APPLICATION_NOT_FOUND', 'Application not found');
+      return rows[0];
+    });
+  });
+
+  app.patch('/applications/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'application.update');
+    const body = z.object({
+      name: z.string().min(2).max(120).optional(),
+      description: z.string().max(500).optional(),
+      targetUrl: z.string().url().optional(),
+      collectionId: z.string().uuid().optional(),
+      credentialId: z.string().uuid().optional(),
+      accessPolicy: z.enum(['DIRECT', 'APPROVAL_REQUIRED', 'JIT']).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const updates: string[] = [];
+      const values: (string | null)[] = [];
+      let i = 1;
+      if (body.name !== undefined) { updates.push(`name = $${i++}`); values.push(body.name); }
+      if (body.description !== undefined) { updates.push(`description = $${i++}`); values.push(body.description); }
+      if (body.targetUrl !== undefined) { updates.push(`target_url = $${i++}`); values.push(body.targetUrl); }
+      if (body.collectionId !== undefined) { updates.push(`collection_id = $${i++}`); values.push(body.collectionId); }
+      if (body.credentialId !== undefined) { updates.push(`credential_id = $${i++}`); values.push(body.credentialId); }
+      if (body.accessPolicy !== undefined) { updates.push(`access_policy = $${i++}`); values.push(body.accessPolicy); }
+      updates.push(`updated_at = now()`);
+      
+      const { rows } = await c.query(
+        `UPDATE applications SET ${updates.join(', ')} WHERE id = $${i} AND tenant_id = $${i+1} RETURNING *`,
+        [...values, (req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'APPLICATION_NOT_FOUND', 'Application not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'APPLICATION_UPDATED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.delete('/applications/:id', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'application.delete');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `DELETE FROM applications WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'APPLICATION_NOT_FOUND', 'Application not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'APPLICATION_DELETED', resourceId: rows[0].id });
+      return reply.status(204).send();
+    });
+  });
+
+  /* ---------------- credentials ---------------- */
+  app.get('/credentials', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, kind, target, username, collection_id, access_policy, rotation_policy, key_version, created_at, updated_at 
+           FROM credentials WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  app.post('/credentials', async (req) => {
+    const p = await principal(req);
+    require(p, 'credential.create');
+    const body = z.object({
+      name: z.string().min(2).max(120),
+      description: z.string().max(500).optional(),
+      kind: z.enum(['PASSWORD', 'API_KEY', 'SSH_KEY', 'TOKEN', 'CERT', 'NOTE', 'SECRET']).default('PASSWORD'),
+      target: z.string().max(500),
+      username: z.string().max(255).optional(),
+      secret: z.string().min(1),
+      collectionId: z.string().uuid(),
+      accessPolicy: z.enum(['PERMANENT', 'JIT', 'APPROVAL_REQUIRED']).default('PERMANENT'),
+      rotationPolicy: z.enum(['manual', '30d', '90d', '180d']).default('manual'),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      // Use the vault to create encrypted credential
+      const cred = await createCredential({
+        tenantId: p.tenantId,
+        name: body.name,
+        description: body.description,
+        kind: body.kind,
+        target: body.target,
+        username: body.username,
+        secret: body.secret,
+        collectionId: body.collectionId,
+        accessPolicy: body.accessPolicy,
+        rotationPolicy: body.rotationPolicy,
+      });
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'CREDENTIAL_CREATED', resourceId: cred.id });
+      return cred;
+    });
+  });
+
+  app.get('/credentials/:id', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, kind, target, username, collection_id, access_policy, rotation_policy, key_version, created_at, updated_at 
+           FROM credentials WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'CREDENTIAL_NOT_FOUND', 'Credential not found');
+      return rows[0];
+    });
+  });
+
+  app.patch('/credentials/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'credential.update');
+    const body = z.object({
+      name: z.string().min(2).max(120).optional(),
+      description: z.string().max(500).optional(),
+      target: z.string().max(500).optional(),
+      username: z.string().max(255).optional(),
+      collectionId: z.string().uuid().optional(),
+      accessPolicy: z.enum(['PERMANENT', 'JIT', 'APPROVAL_REQUIRED']).optional(),
+      rotationPolicy: z.enum(['manual', '30d', '90d', '180d']).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const updates: string[] = [];
+      const values: (string | null)[] = [];
+      let i = 1;
+      if (body.name !== undefined) { updates.push(`name = $${i++}`); values.push(body.name); }
+      if (body.description !== undefined) { updates.push(`description = $${i++}`); values.push(body.description); }
+      if (body.target !== undefined) { updates.push(`target = $${i++}`); values.push(body.target); }
+      if (body.username !== undefined) { updates.push(`username = $${i++}`); values.push(body.username); }
+      if (body.collectionId !== undefined) { updates.push(`collection_id = $${i++}`); values.push(body.collectionId); }
+      if (body.accessPolicy !== undefined) { updates.push(`access_policy = $${i++}`); values.push(body.accessPolicy); }
+      if (body.rotationPolicy !== undefined) { updates.push(`rotation_policy = $${i++}`); values.push(body.rotationPolicy); }
+      updates.push(`updated_at = now()`);
+      
+      const { rows } = await c.query(
+        `UPDATE credentials SET ${updates.join(', ')} WHERE id = $${i} AND tenant_id = $${i+1} RETURNING *`,
+        [...values, (req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'CREDENTIAL_NOT_FOUND', 'Credential not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'CREDENTIAL_UPDATED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.delete('/credentials/:id', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'credential.delete');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `UPDATE credentials SET deleted_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'CREDENTIAL_NOT_FOUND', 'Credential not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'CREDENTIAL_DELETED', resourceId: rows[0].id });
+      return reply.status(204).send();
+    });
+  });
+
+  /* ---------------- sessions ---------------- */
+  app.get('/sessions', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT s.id, s.tenant_id, s.user_id, u.name as user_name, s.application_id, a.name as application_name, 
+                s.credential_id, cr.name as credential_name, s.status, s.started_at, s.expires_at, s.ip_address, s.user_agent
+           FROM sessions s 
+           LEFT JOIN users u ON u.id = s.user_id
+           LEFT JOIN applications a ON a.id = s.application_id
+           LEFT JOIN credentials cr ON cr.id = s.credential_id
+           WHERE s.tenant_id = $1 ORDER BY s.started_at DESC`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  app.post('/sessions', async (req) => {
+    const p = await principal(req);
+    require(p, 'session.start');
+    const body = z.object({
+      applicationId: z.string().uuid(),
+      credentialId: z.string().uuid(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      // Issue a launch grant
+      const grant = await issueLaunchGrant({
+        tenantId: p.tenantId,
+        userId: p.userId,
+        applicationId: body.applicationId,
+        credentialId: body.credentialId,
+      });
+      
+      // Create session record
+      const { rows } = await c.query(
+        `INSERT INTO sessions (tenant_id, user_id, application_id, credential_id, status, started_at, expires_at, ip_address, user_agent)
+           VALUES ($1, $2, $3, $4, 'ACTIVE', now(), now() + interval '1 hour', $5, $6)
+           RETURNING id, tenant_id, user_id, application_id, credential_id, status, started_at, expires_at`,
+        [p.tenantId, p.userId, body.applicationId, body.credentialId, req.ip, req.headers['user-agent'] || 'unknown']);
+      
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'SESSION_STARTED', resourceId: rows[0].id });
+      
+      return {
+        session: rows[0],
+        grant,
+      };
+    });
+  });
+
+  app.patch('/sessions/:id/terminate', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'session.terminate');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `UPDATE sessions SET status = 'TERMINATED', ended_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'SESSION_NOT_FOUND', 'Session not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'SESSION_TERMINATED', resourceId: rows[0].id });
+      return reply.status(204).send();
+    });
+  });
+
+  /* ---------------- access requests ---------------- */
+  app.get('/access-requests', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT ar.id, ar.tenant_id, ar.requester_id, u.name as requester_name, ar.credential_id, cr.name as credential_name, 
+                ar.reason, ar.ticket_reference, ar.status, ar.requested_at, ar.expires_at, ar.approved_by, ar.approved_at, ar.denied_reason
+           FROM access_requests ar 
+           LEFT JOIN users u ON u.id = ar.requester_id
+           LEFT JOIN credentials cr ON cr.id = ar.credential_id
+           WHERE ar.tenant_id = $1 ORDER BY ar.requested_at DESC`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  app.post('/access-requests', async (req) => {
+    const p = await principal(req);
+    const body = z.object({
+      credentialId: z.string().uuid(),
+      reason: z.string().min(10).max(1000),
+      durationHours: z.number().int().min(1).max(24).default(1),
+      ticketReference: z.string().max(100).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO access_requests (tenant_id, requester_id, credential_id, reason, ticket_reference, status, requested_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, 'PENDING', now(), now() + interval '${body.durationHours} hours')
+           RETURNING *`,
+        [p.tenantId, p.userId, body.credentialId, body.reason, body.ticketReference]);
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'ACCESS_REQUESTED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.post('/access-requests/:id/approve', async (req) => {
+    const p = await principal(req);
+    require(p, 'access_request.approve');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `UPDATE access_requests SET status = 'APPROVED', approved_by = $1, approved_at = now() 
+           WHERE id = $2 AND tenant_id = $3 AND status = 'PENDING' RETURNING *`,
+        [p.userId, (req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found or already processed');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'ACCESS_APPROVED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.post('/access-requests/:id/deny', async (req) => {
+    const p = await principal(req);
+    require(p, 'access_request.deny');
+    const body = z.object({ reason: z.string().max(500).optional() }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `UPDATE access_requests SET status = 'DENIED', denied_by = $1, denied_at = now(), denied_reason = $2 
+           WHERE id = $3 AND tenant_id = $4 AND status = 'PENDING' RETURNING *`,
+        [p.userId, body.reason, (req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found or already processed');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'ACCESS_DENIED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  /* ---------------- audit events ---------------- */
+  app.get('/audit-events', async (req) => {
+    const p = await principal(req);
+    require(p, 'audit.view');
+    const query = z.object({
+      page: z.number().int().min(1).default(1),
+      limit: z.number().int().min(1).max(100).default(50),
+      eventType: z.string().optional(),
+      userId: z.string().optional(),
+      startDate: z.string().datetime().optional(),
+      endDate: z.string().datetime().optional(),
+    }).parse(req.query);
+    
+    return withTenant(p.tenantId, async (c) => {
+      let whereClause = 'WHERE tenant_id = $1';
+      const params: (string | number)[] = [p.tenantId];
+      let paramIndex = 2;
+      
+      if (query.eventType) {
+        whereClause += ` AND event_type = $${paramIndex++}`;
+        params.push(query.eventType);
+      }
+      if (query.userId) {
+        whereClause += ` AND actor_id = $${paramIndex++}`;
+        params.push(query.userId);
+      }
+      if (query.startDate) {
+        whereClause += ` AND ts >= $${paramIndex++}`;
+        params.push(query.startDate);
+      }
+      if (query.endDate) {
+        whereClause += ` AND ts <= $${paramIndex++}`;
+        params.push(query.endDate);
+      }
+      
+      const offset = (query.page - 1) * query.limit;
+      
+      const [eventsResult, countResult] = await Promise.all([
+        c.query(`SELECT * FROM audit_events ${whereClause} ORDER BY ts DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`, 
+          [...params, query.limit, offset]),
+        c.query(`SELECT COUNT(*) FROM audit_events ${whereClause}`, params),
+      ]);
+      
+      return {
+        events: eventsResult.rows,
+        total: parseInt(countResult.rows[0].count),
+        page: query.page,
+        limit: query.limit,
+        totalPages: Math.ceil(parseInt(countResult.rows[0].count) / query.limit),
+      };
+    });
+  });
+
+  /* ---------------- collections ---------------- */
+  app.get('/collections', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, created_at, updated_at 
+           FROM collections WHERE tenant_id = $1 ORDER BY name`,
+        [p.tenantId]);
+      return rows;
+    });
+  });
+
+  app.post('/collections', async (req) => {
+    const p = await principal(req);
+    require(p, 'collection.create');
+    const body = z.object({
+      name: z.string().min(2).max(120),
+      description: z.string().max(500).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO collections (tenant_id, name, description, created_at, updated_at)
+           VALUES ($1, $2, $3, now(), now())
+           RETURNING id, tenant_id, name, description, created_at, updated_at`,
+        [p.tenantId, body.name, body.description]);
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_CREATED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.get('/collections/:id', async (req) => {
+    const p = await principal(req);
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT id, tenant_id, name, description, created_at, updated_at 
+           FROM collections WHERE id = $1 AND tenant_id = $2`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      return rows[0];
+    });
+  });
+
+  app.patch('/collections/:id', async (req) => {
+    const p = await principal(req);
+    require(p, 'collection.update');
+    const body = z.object({
+      name: z.string().min(2).max(120).optional(),
+      description: z.string().max(500).optional(),
+    }).parse(req.body);
+    return withTenant(p.tenantId, async (c) => {
+      const updates: string[] = [];
+      const values: (string | null)[] = [];
+      let i = 1;
+      if (body.name !== undefined) { updates.push(`name = $${i++}`); values.push(body.name); }
+      if (body.description !== undefined) { updates.push(`description = $${i++}`); values.push(body.description); }
+      updates.push(`updated_at = now()`);
+      
+      const { rows } = await c.query(
+        `UPDATE collections SET ${updates.join(', ')} WHERE id = $${i} AND tenant_id = $${i+1} RETURNING *`,
+        [...values, (req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_UPDATED', resourceId: rows[0].id });
+      return rows[0];
+    });
+  });
+
+  app.delete('/collections/:id', async (req, reply) => {
+    const p = await principal(req);
+    require(p, 'collection.delete');
+    return withTenant(p.tenantId, async (c) => {
+      const { rows } = await c.query(
+        `DELETE FROM collections WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+        [(req.params as { id: string }).id, p.tenantId]);
+      if (rows.length === 0) throw new HttpError(404, 'COLLECTION_NOT_FOUND', 'Collection not found');
+      await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'COLLECTION_DELETED', resourceId: rows[0].id });
+      return reply.status(204).send();
+    });
+  });
+
+
   return app;
 }
