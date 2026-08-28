@@ -710,7 +710,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     const p = await principal(req);
     return withTenant(p.tenantId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at 
+        `SELECT id, tenant_id, name, kind, domain, url as target_url, created_at, updated_at 
            FROM applications WHERE tenant_id = $1 ORDER BY name`,
         [p.tenantId]);
       return rows;
@@ -722,19 +722,16 @@ export async function buildApp(): Promise<FastifyInstance> {
     require(p, 'application.create');
     const body = z.object({
       name: z.string().min(2).max(120),
-      description: z.string().max(500).optional(),
-      kind: z.enum(['WEB', 'SSH', 'RDP', 'DB', 'API']),
-      targetUrl: z.string().url().optional(),
-      collectionId: z.string().uuid().optional(),
-      credentialId: z.string().uuid().optional(),
-      accessPolicy: z.enum(['DIRECT', 'APPROVAL_REQUIRED', 'JIT']).default('DIRECT'),
+      kind: z.enum(['WEB', 'SSH', 'RDP', 'DB', 'NETWORK']).default('WEB'),
+      domain: z.string().max(255),
+      url: z.string().url(),
     }).parse(req.body);
     return withTenant(p.tenantId, async (c) => {
       const { rows } = await c.query(
-        `INSERT INTO applications (tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-           RETURNING id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at`,
-        [p.tenantId, body.name, body.description, body.kind, body.targetUrl, body.collectionId, body.credentialId, body.accessPolicy]);
+        `INSERT INTO applications (tenant_id, name, kind, domain, url, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, now(), now())
+           RETURNING id, tenant_id, name, kind, domain, url as target_url, created_at, updated_at`,
+        [p.tenantId, body.name, body.kind, body.domain, body.url]);
       await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'APPLICATION_CREATED', resourceId: rows[0].id });
       return rows[0];
     });
@@ -744,7 +741,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     const p = await principal(req);
     return withTenant(p.tenantId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, tenant_id, name, description, kind, target_url, collection_id, credential_id, access_policy, created_at, updated_at 
+        `SELECT id, tenant_id, name, kind, domain, url as target_url, created_at, updated_at 
            FROM applications WHERE id = $1 AND tenant_id = $2`,
         [(req.params as { id: string }).id, p.tenantId]);
       if (rows.length === 0) throw new HttpError(404, 'APPLICATION_NOT_FOUND', 'Application not found');
@@ -757,22 +754,18 @@ export async function buildApp(): Promise<FastifyInstance> {
     require(p, 'application.update');
     const body = z.object({
       name: z.string().min(2).max(120).optional(),
-      description: z.string().max(500).optional(),
-      targetUrl: z.string().url().optional(),
-      collectionId: z.string().uuid().optional(),
-      credentialId: z.string().uuid().optional(),
-      accessPolicy: z.enum(['DIRECT', 'APPROVAL_REQUIRED', 'JIT']).optional(),
+      kind: z.enum(['WEB', 'SSH', 'RDP', 'DB', 'NETWORK']).optional(),
+      domain: z.string().max(255).optional(),
+      url: z.string().url().optional(),
     }).parse(req.body);
     return withTenant(p.tenantId, async (c) => {
       const updates: string[] = [];
       const values: (string | null)[] = [];
       let i = 1;
       if (body.name !== undefined) { updates.push(`name = $${i++}`); values.push(body.name); }
-      if (body.description !== undefined) { updates.push(`description = $${i++}`); values.push(body.description); }
-      if (body.targetUrl !== undefined) { updates.push(`target_url = $${i++}`); values.push(body.targetUrl); }
-      if (body.collectionId !== undefined) { updates.push(`collection_id = $${i++}`); values.push(body.collectionId); }
-      if (body.credentialId !== undefined) { updates.push(`credential_id = $${i++}`); values.push(body.credentialId); }
-      if (body.accessPolicy !== undefined) { updates.push(`access_policy = $${i++}`); values.push(body.accessPolicy); }
+      if (body.kind !== undefined) { updates.push(`kind = $${i++}`); values.push(body.kind); }
+      if (body.domain !== undefined) { updates.push(`domain = $${i++}`); values.push(body.domain); }
+      if (body.url !== undefined) { updates.push(`url = $${i++}`); values.push(body.url); }
       updates.push(`updated_at = now()`);
       
       const { rows } = await c.query(
@@ -802,7 +795,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     const p = await principal(req);
     return withTenant(p.tenantId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, tenant_id, name, description, kind, target, username, collection_id, access_policy, rotation_policy, key_version, created_at, updated_at 
+        `SELECT id, tenant_id, name, target, kind, 
+                COALESCE(username_encrypted::text, '') as username, 
+                rotation_policy as rotation_policy, 
+                access as access_policy,
+                key_version, created_at, updated_at 
            FROM credentials WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name`,
         [p.tenantId]);
       return rows;
@@ -815,30 +812,28 @@ export async function buildApp(): Promise<FastifyInstance> {
     const body = z.object({
       name: z.string().min(2).max(120),
       description: z.string().max(500).optional(),
-      kind: z.enum(['PASSWORD', 'API_KEY', 'SSH_KEY', 'TOKEN', 'CERT', 'NOTE', 'SECRET']).default('PASSWORD'),
+      kind: z.enum(['PASSWORD', 'API_KEY', 'SSH_KEY', 'TOKEN', 'CERT', 'NOTE', 'SECRET', 'RECOVERY_CODES']).default('PASSWORD'),
       target: z.string().max(500),
       username: z.string().max(255).optional(),
       secret: z.string().min(1),
-      collectionId: z.string().uuid(),
-      accessPolicy: z.enum(['PERMANENT', 'JIT', 'APPROVAL_REQUIRED']).default('PERMANENT'),
-      rotationPolicy: z.enum(['manual', '30d', '90d', '180d']).default('manual'),
+      collectionIds: z.array(z.string().uuid()).optional().default([]),
+      access: z.enum(['PERMANENT', 'APPROVAL_REQUIRED', 'ONE_TIME', 'SCHEDULED', 'EMERGENCY']).default('PERMANENT'),
+      rotationPolicy: z.string().default('manual'),
     }).parse(req.body);
     return withTenant(p.tenantId, async (c) => {
       // Use the vault to create encrypted credential
       const cred = await createCredential({
-        tenantId: p.tenantId,
         name: body.name,
-        description: body.description,
-        kind: body.kind,
         target: body.target,
-        username: body.username,
+        kind: body.kind,
+        username: body.username || '',
         secret: body.secret,
-        collectionId: body.collectionId,
-        accessPolicy: body.accessPolicy,
+        collectionIds: body.collectionIds,
         rotationPolicy: body.rotationPolicy,
-      });
+        access: body.access,
+      }, p);
       await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'CREDENTIAL_CREATED', resourceId: cred.id });
-      return cred;
+      return { id: cred.id, name: body.name, target: body.target, kind: body.kind, access: body.access, rotationPolicy: body.rotationPolicy, createdAt: new Date().toISOString() };
     });
   });
 
@@ -846,7 +841,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     const p = await principal(req);
     return withTenant(p.tenantId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, tenant_id, name, description, kind, target, username, collection_id, access_policy, rotation_policy, key_version, created_at, updated_at 
+        `SELECT id, tenant_id, name, target, kind, 
+                COALESCE(username_encrypted::text, '') as username, 
+                rotation_policy as rotation_policy, 
+                access as access_policy,
+                key_version, created_at, updated_at 
            FROM credentials WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
         [(req.params as { id: string }).id, p.tenantId]);
       if (rows.length === 0) throw new HttpError(404, 'CREDENTIAL_NOT_FOUND', 'Credential not found');
@@ -859,24 +858,18 @@ export async function buildApp(): Promise<FastifyInstance> {
     require(p, 'credential.update');
     const body = z.object({
       name: z.string().min(2).max(120).optional(),
-      description: z.string().max(500).optional(),
       target: z.string().max(500).optional(),
-      username: z.string().max(255).optional(),
-      collectionId: z.string().uuid().optional(),
-      accessPolicy: z.enum(['PERMANENT', 'JIT', 'APPROVAL_REQUIRED']).optional(),
-      rotationPolicy: z.enum(['manual', '30d', '90d', '180d']).optional(),
+      rotationPolicy: z.string().optional(),
+      access: z.enum(['PERMANENT', 'APPROVAL_REQUIRED', 'ONE_TIME', 'SCHEDULED', 'EMERGENCY']).optional(),
     }).parse(req.body);
     return withTenant(p.tenantId, async (c) => {
       const updates: string[] = [];
       const values: (string | null)[] = [];
       let i = 1;
       if (body.name !== undefined) { updates.push(`name = $${i++}`); values.push(body.name); }
-      if (body.description !== undefined) { updates.push(`description = $${i++}`); values.push(body.description); }
       if (body.target !== undefined) { updates.push(`target = $${i++}`); values.push(body.target); }
-      if (body.username !== undefined) { updates.push(`username = $${i++}`); values.push(body.username); }
-      if (body.collectionId !== undefined) { updates.push(`collection_id = $${i++}`); values.push(body.collectionId); }
-      if (body.accessPolicy !== undefined) { updates.push(`access_policy = $${i++}`); values.push(body.accessPolicy); }
       if (body.rotationPolicy !== undefined) { updates.push(`rotation_policy = $${i++}`); values.push(body.rotationPolicy); }
+      if (body.access !== undefined) { updates.push(`access = $${i++}`); values.push(body.access); }
       updates.push(`updated_at = now()`);
       
       const { rows } = await c.query(
