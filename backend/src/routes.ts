@@ -18,6 +18,7 @@ import { cfg, pool, redis, withTenant, HttpError } from './db.js';
 import { audit, verifyChain, type AuditType } from './audit.js';
 import { establishSession, rotateRefresh, passwordLogin, oidcCallback, totpValid, type Principal } from './auth.js';
 import { createCredential, issueLaunchGrant, consumeGrant, attemptReveal, breakGlass, rotateCredential, rotateTenantKeys } from './vault.js';
+import { checkInitialSetup, initializeSystem } from './setup.js';
 import { randomToken } from './crypto.js';
 
 const jwtSecret = new TextEncoder().encode(cfg.cookieSecret);
@@ -80,6 +81,34 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.get('/healthz', async () => ({ ok: true, ts: Date.now() }));
+  /* ---------------- initial setup (only available before first tenant) ---------------- */
+  app.get('/setup/check', async (_req, reply) => {
+    try {
+      const result = await checkInitialSetup();
+      return result;
+    } catch (e) {
+      return reply.status(500).send({ error: 'SETUP_CHECK_FAILED', message: e instanceof Error ? e.message : 'Unknown error' });
+    }
+  });
+
+  const initSchema = z.object({
+    organizationName: z.string().min(2).max(120),
+    adminName: z.string().min(2).max(120),
+    adminEmail: z.string().email(),
+    adminPassword: z.string().min(12).max(128),
+    tenantSlug: z.string().min(2).max(64).regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/),
+  });
+
+  app.post('/setup/initialize', async (req, reply) => {
+    const body = initSchema.parse(req.body);
+    try {
+      const result = await initializeSystem(body);
+      return result;
+    } catch (e) {
+      return reply.status(400).send({ error: 'SETUP_FAILED', message: e instanceof Error ? e.message : 'Unknown error' });
+    }
+  });
+
 
   /* ---------------- auth ---------------- */
   const loginSchema = z.object({ tenant: z.string().min(2).max(64), email: z.string().email(), password: z.string().min(8).max(128) });
