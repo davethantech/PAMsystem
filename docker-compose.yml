@@ -1,0 +1,214 @@
+# Keyrail PAM Cloud - Local Development
+# 
+# This file provides a complete local development environment that mirrors
+# the production topology. All services run in Docker containers.
+#
+# Architecture:
+#   Internet -> Edge (Nginx) -> Frontend/API -> Internal Network -> PostgreSQL/Redis
+#
+# Usage:
+#   docker compose up -d           # Start all services
+#   docker compose down            # Stop and remove containers
+#   docker compose logs -f backend # View backend logs
+#
+# After starting, run:
+#   docker compose exec backend npm run seed:dev  # Seed demo tenant
+#   node infrastructure/smoke.mjs                # Run 14-step end-to-end test
+#
+# Access:
+#   Frontend: https://localhost:443 (or http://localhost:80)
+#   API: https://localhost:443/api
+#   PostgreSQL: localhost:5432 (internal only)
+#   Redis: localhost:6379 (internal only)
+
+name: keyrail-pam
+
+services:
+  # ========================================================================
+  # Edge Proxy - Terminates TLS, enforces security headers, routes traffic
+  # ========================================================================
+  edge:
+    image: nginx:1.27-alpine
+    container_name: keyrail-edge
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/dev/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/dev/certs:/etc/nginx/certs:ro
+      - ./frontend-dist:/usr/share/nginx/html:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - edge
+      - api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ========================================================================
+  # Frontend - Static React application (Vite build)
+  # ========================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: keyrail-frontend
+    environment:
+      - NODE_ENV=development
+      - VITE_API_URL=https://pam.keyrail.local/api
+    volumes:
+      - ./public:/usr/share/nginx/html:ro
+    networks:
+      - api
+    restart: unless-stopped
+
+  # ========================================================================
+  # Backend API - Fastify-based control plane
+  # ========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: keyrail-backend
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://keyrail:keyrail-dev-only@postgres:5432/keyrail
+      - REDIS_URL=redis://redis:6379
+      - PG_SSL=false
+      - KMS_PROVIDER=local
+      - KMS_KEY_ID=
+      - COOKIE_SECRET=${COOKIE_SECRET:?err}
+      - ISSUER=https://pam.keyrail.local
+      - SESSION_TTL_MIN=120
+      - IDLE_TIMEOUT_MIN=15
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - api
+      - vault
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ========================================================================
+  # PostgreSQL - Primary database with Row Level Security
+  # ========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: keyrail-postgres
+    environment:
+      - POSTGRES_USER=keyrail
+      - POSTGRES_PASSWORD=keyrail-dev-only
+      - POSTGRES_DB=keyrail
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - vault
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keyrail -d keyrail"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ========================================================================
+  # Redis - Cache, session store, and message queue
+  # ========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: keyrail-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - vault
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ========================================================================
+  # Connector Gateway - Bridges cloud to customer connectors
+  # ========================================================================
+  connector-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: keyrail-connector-gateway
+    command: ["node", "dist/main.js", "--gateway"]
+    environment:
+      - PORT=8081
+      - DATABASE_URL=postgres://keyrail:keyrail-dev-only@postgres:5432/keyrail
+      - REDIS_URL=redis://redis:6379
+      - COOKIE_SECRET=${COOKIE_SECRET:?err}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - api
+      - vault
+      - internal
+    restart: unless-stopped
+
+  # ========================================================================
+  # Connector - Customer-side bridge (outbound-only mTLS)
+  # ========================================================================
+  connector:
+    build:
+      context: ./connector
+      dockerfile: Dockerfile
+    container_name: keyrail-connector
+    environment:
+      - KEYRAIL_CONFIG=/etc/keyrail/connector.yaml
+    volumes:
+      - ./infrastructure/dev/connector.yaml:/etc/keyrail/connector.yaml:ro
+      - ./infrastructure/dev/certs:/etc/keyrail/certs:ro
+    networks:
+      - internal
+    depends_on:
+      - connector-gateway
+    restart: unless-stopped
+
+  # ========================================================================
+  # Mail Testing Service - For local email testing
+  # ========================================================================
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: keyrail-mailpit
+    ports:
+      - "8025:8025"  # Web UI
+      - "1025:1025"  # SMTP
+    networks:
+      - vault
+    restart: unless-stopped
+
+networks:
+  edge:
+    driver: bridge
+  api:
+    driver: bridge
+    internal: true
+  vault:
+    driver: bridge
+    internal: true
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:

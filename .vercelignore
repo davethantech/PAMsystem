@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.test.example
+!.env.production.example
+
+# Local development files
+.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+
+# Documentation
+docs/
+*.md
+
+# Infrastructure
+infrastructure/
+
+# Backend (deployed separately)
+backend/
+
+# Browser extension
+browser-extension/
+
+# Connector
+connector/
+
+# Database
+database/
+
+# Tests
+tests/
+
+# Scripts
+scripts/
+
+# TypeScript
+*.tsbuildinfo

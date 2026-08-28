@@ -1,0 +1,132 @@
+# Keyrail PAM Cloud - Development Configuration
+# 
+# This file extends docker-compose.yml for development with:
+# - Hot-reloading for frontend and backend
+# - Exposed ports for direct access
+# - Volume mounts for live code editing
+# - Debug configuration
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Access:
+#   Frontend: http://localhost:3000 (Vite dev server)
+#   Backend API: http://localhost:8080
+#   PostgreSQL: localhost:5432
+#   Redis: localhost:6379
+#   Mailpit: http://localhost:8025
+
+name: keyrail-pam-dev
+
+services:
+  # Override frontend to use Vite dev server
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend.dev
+    container_name: keyrail-frontend-dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./index.html:/app/index.html:ro
+      - ./vite.config.js:/app/vite.config.js:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+    environment:
+      - NODE_ENV=development
+      - VITE_API_URL=http://localhost:8080
+    command: npm run dev
+    networks:
+      - api
+    restart: unless-stopped
+
+  # Override backend for hot-reloading
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: keyrail-backend-dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./backend/package.json:/app/package.json:ro
+      - ./backend/package-lock.json:/app/package-lock.json:ro
+      - ./backend/tsconfig.json:/app/tsconfig.json:ro
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://keyrail:keyrail-dev-only@postgres:5432/keyrail
+      - REDIS_URL=redis://redis:6379
+      - PG_SSL=false
+      - KMS_PROVIDER=local
+      - KMS_KEY_ID=
+      - COOKIE_SECRET=${COOKIE_SECRET:?err}
+      - ISSUER=http://localhost:8080
+      - SESSION_TTL_MIN=120
+      - IDLE_TIMEOUT_MIN=15
+    command: npm run dev
+    networks:
+      - api
+      - vault
+    restart: unless-stopped
+
+  # Expose PostgreSQL for local database tools
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=keyrail
+      - POSTGRES_PASSWORD=keyrail-dev-only
+      - POSTGRES_DB=keyrail
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - vault
+    restart: unless-stopped
+
+  # Expose Redis for local debugging
+  redis:
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - vault
+    restart: unless-stopped
+
+  # Expose connector gateway for debugging
+  connector-gateway:
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - DATABASE_URL=postgres://keyrail:keyrail-dev-only@postgres:5432/keyrail
+      - REDIS_URL=redis://redis:6379
+      - COOKIE_SECRET=${COOKIE_SECRET:?err}
+    networks:
+      - api
+      - vault
+      - internal
+    restart: unless-stopped
+
+networks:
+  edge:
+    driver: bridge
+  api:
+    driver: bridge
+    internal: true
+  vault:
+    driver: bridge
+    internal: true
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
