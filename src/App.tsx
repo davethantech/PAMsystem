@@ -4,7 +4,7 @@
  * This is the real application entry point that uses the API client
  * instead of the simulated in-memory engine.
  */
-import { PamProvider, usePam } from './state/store-new';
+import { PamProvider, usePam } from './state/store';
 import Setup from './screens/Setup';
 import Login from './screens/Login-new';
 import Shell, { ToastHost } from './screens/Shell-new';
