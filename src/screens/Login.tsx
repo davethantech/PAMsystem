@@ -5,7 +5,7 @@
  * NO hardcoded users. NO demo passwords. NO persona switching.
  */
 import { useEffect, useState, useCallback } from 'react';
-import { usePam } from '../state/store-new';
+import { usePam } from '../state/store';
 import { BrandMark } from '../components/icons';
 
 // Removed: PERSONAS, demo data, simulated telemetry

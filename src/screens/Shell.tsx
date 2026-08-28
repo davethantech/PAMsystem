@@ -7,7 +7,7 @@
 import { useState, type ReactNode } from 'react';
 import { I } from '../components/icons';
 import { Chip, Dot, fmtCountdown, fmtDur } from '../components/ui';
-import { toastTone, usePam, type Route } from '../state/store-new';
+import { toastTone, usePam, type Route } from '../state/store';
 
 const NAV: { group: string; items: { route: Route; label: string; icon: string }[] }[] = [
   { group: 'Overview', items: [

@@ -5,8 +5,8 @@
  * It allows the first administrator to create the first tenant and admin account.
  */
 import { useState, useCallback } from 'react';
-import { usePam } from '../state/store-new';
-import { toastTone } from '../state/store-new';
+import { usePam } from '../state/store';
+import { toastTone } from '../state/store';
 
 export default function Setup() {
   const { initializeSystem, loading } = usePam();
