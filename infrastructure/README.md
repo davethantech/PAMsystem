@@ -1,43 +1,127 @@
-# Infrastructure
+# Keyrail PAM Cloud - Infrastructure
 
-## Local development
+## Overview
+
+This directory contains the infrastructure configuration for deploying Keyrail PAM Cloud in various environments.
+
+---
+
+## Directory Structure
+
+```
+infrastructure/
+├── docker-compose.yml          # Base Docker Compose configuration
+├── docker-compose.dev.yml      # Development overrides
+├── docker-compose.prod.yml     # Production overrides
+├── dev/                        # Development-specific files
+│   ├── nginx.conf              # Nginx configuration for dev
+│   ├── connector.yaml          # Connector configuration for dev
+│   ├── gen-certs.sh            # Certificate generation script
+│   └── smoke.mjs               # End-to-end smoke test
+├── prod/                       # Production-specific files
+│   ├── nginx.conf              # Nginx configuration for prod
+│   ├── connector.yaml          # Connector configuration for prod
+│   └── certs/                  # TLS certificates (not committed)
+├── k8s/                        # Kubernetes deployment
+│   ├── keyrail.yaml
+│   ├── values.yaml
+│   └── README.md
+└── README.md
+```
+
+---
+
+## Local Development
+
+### Prerequisites
+
+- Docker (20.10+)
+- Docker Compose (2.0+)
+- Node.js (18+)
+- OpenSSL
+
+### Quick Start
 
 ```bash
+# Generate development certificates
+bash infrastructure/dev/gen-certs.sh
+
+# Set required environment variable
 export COOKIE_SECRET=$(openssl rand -hex 32)
-docker compose up --build
+
+# Start all services
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# Seed the database
+docker compose exec backend npm run seed:dev
+
+# Run smoke test
+node infrastructure/smoke.mjs
 ```
 
-Topology mirrors production: `edge` (nginx, only public ports) → `api` (private)
-→ `vault` network (postgres/redis, `internal: true` — no public route) →
-`internal` network (customer-LAN simulation where the connector lives).
-Migrations run automatically from `../database/migrations`.
+### Services
 
-## Cloud deployment (AWS / Azure / GCP)
+| Service | Port | Purpose |
+|---------|------|---------|
+| Frontend | 3000 | React dev server |
+| Backend | 8080 | API server |
+| PostgreSQL | 5432 | Database |
+| Redis | 6379 | Cache |
+| Mailpit | 8025 | Email testing |
 
-`k8s.yaml` is cloud-agnostic. Per-cloud additions:
+---
 
-| Concern        | AWS                              | Azure                      | GCP                     |
-| -------------- | -------------------------------- | -------------------------- | ----------------------- |
-| KMS master key | KMS CMK (HSM-backed, per tenant) | Key Vault Managed HSM      | Cloud KMS (HSM level)   |
-| Database       | RDS/Aurora PG 16 multi-AZ + PITR | Flexible Server + Geo HA   | Cloud SQL HA + PITR     |
-| Secrets        | Secrets Manager + ESO            | Key Vault + ESO            | Secret Manager + ESO    |
-| Ingress        | ALB + cert-manager               | App Gateway + cert-manager | GKE Ingress + managed certs |
-| Monitoring     | CloudWatch + Grafana             | Monitor + Grafana          | Cloud Monitoring + Grafana |
+## Production Deployment
 
-### Deploy
+### Prerequisites
+
+- Linux server (Ubuntu 22.04+)
+- Docker (20.10+)
+- Docker Compose (2.0+)
+- Domain name with SSL certificate
+- Minimum 4GB RAM, 2 vCPUs
+
+### Setup
 
 ```bash
-kubectl apply -f k8s.yaml
-kubectl -n keyrail apply -f <(eso api-secret)   # from your secret manager
-kubectl -n keyrail rollout status deploy/api
+# Clone repository
+git clone <repository-url>
+cd keyrail-pam
+
+# Copy and configure environment
+cp .env.production.example .env
+nano .env
+
+# Generate COOKIE_SECRET
+export COOKIE_SECRET=$(openssl rand -hex 32)
+echo "COOKIE_SECRET=$COOKIE_SECRET" >> .env
+
+# Generate TLS certificates
+mkdir -p infrastructure/prod/certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout infrastructure/prod/certs/key.pem \
+  -out infrastructure/prod/certs/cert.pem \
+  -subj "/CN=pam.yourdomain.com"
+
+# Start services
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# Run migrations
+docker compose exec backend npm run migrate
+
+# Seed initial tenant
+docker compose exec backend npm run seed
 ```
 
-### Operational guarantees
+---
 
-- **HA**: 3× API, 2× PAM, 2× gateway; synchronous PG replica; PDB minAvailable=2
-- **Backups**: PITR (5-min RPO) + nightly encrypted snapshots, cross-region copy
-- **Rolling deploys**: maxUnavailable=1 with readiness gates; zero-downtime
-- **Auto-scaling**: HPA on CPU 65%, 3→12 replicas
-- **Isolation**: NetworkPolicy default-deny; postgres/redis unreachable from edge
+## Kubernetes Deployment
 
-See `docs/DEPLOYMENT.md` for the DR runbook and key ceremony.
+For production Kubernetes deployment, see [k8s/](k8s/) directory.
+
+---
+
+## Related Documentation
+
+- [Deployment Guide](../docs/DEPLOYMENT.md)
+- [Architecture Overview](../docs/architecture/overview.md)
