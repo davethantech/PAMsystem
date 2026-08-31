@@ -79,12 +79,16 @@ export default function Setup() {
   }, [form, validate, initializeSystem]);
 
   const handleChange = useCallback((field: string, value: string) => {
-    setForm((prev) => ({ ...prev, [field]: value }));
+    setForm((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === 'organizationName' && (!prev.tenantSlug || prev.tenantSlug === prev.organizationName.toLowerCase().replace(/[^a-z0-9-]/g, ''))) {
+        next.tenantSlug = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+      }
+      return next;
+    });
     // Clear error when user starts typing
-    if (errors[field]) {
-      setErrors((prev) => ({ ...prev, [field]: '' }));
-    }
-  }, [errors]);
+    setErrors((prev) => (prev[field] ? { ...prev, [field]: '' } : prev));
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">

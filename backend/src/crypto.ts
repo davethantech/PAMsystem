@@ -17,21 +17,41 @@ import { cfg, pool, withTenant } from './db.js';
 const kms = cfg.kmsProvider === 'aws' ? new KMSClient({}) : null;
 
 /* ---------------- local dev stub (NOT a production security mechanism) ---- */
-const LOCAL_MASTER = crypto.randomBytes(32); // regenerated per process start
+const LOCAL_MASTER = crypto.createHash('sha256').update(cfg.cookieSecret).digest();
 async function localWrap(dek: Buffer) {
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv('aes-256-gcm', LOCAL_MASTER, iv);
   return Buffer.concat([iv, c.update(dek), c.final(), c.getAuthTag()]);
 }
 async function localUnwrap(wrapped: Buffer) {
-  const iv = wrapped.subarray(0, 12);
-  const tag = wrapped.subarray(wrapped.length - 16);
+  const w = toBuffer(wrapped);
+  const iv = w.subarray(0, 12);
+  const tag = w.subarray(w.length - 16);
   const d = crypto.createDecipheriv('aes-256-gcm', LOCAL_MASTER, iv);
   d.setAuthTag(tag);
-  return Buffer.concat([d.update(wrapped.subarray(12, wrapped.length - 16)), d.final()]);
+  return Buffer.concat([d.update(w.subarray(12, w.length - 16)), d.final()]);
 }
 
 /* ---------------- KMS-backed DEK lifecycle -------------------------------- */
+export function toBytea(buf: Buffer): any {
+  return '\\x' + buf.toString('hex');
+}
+
+export function toBuffer(val: any): Buffer {
+  if (!val) return Buffer.alloc(0);
+  if (Buffer.isBuffer(val)) {
+    const str = val.toString('utf8');
+    if (str.startsWith('\\x')) return Buffer.from(str.slice(2), 'hex');
+    return val;
+  }
+  if (val instanceof Uint8Array) return Buffer.from(val);
+  if (typeof val === 'string') {
+    if (val.startsWith('\\x')) return Buffer.from(val.slice(2), 'hex');
+    return Buffer.from(val, 'hex');
+  }
+  return Buffer.from(val);
+}
+
 export async function generateDek(tenantId: string): Promise<{ version: number }> {
   // encryption_keys is RLS-FORCED → must be touched inside a tenant-pinned tx
   return withTenant(tenantId, async (client) => {
@@ -53,7 +73,7 @@ export async function generateDek(tenantId: string): Promise<{ version: number }
     }
     await client.query(
       `INSERT INTO encryption_keys (tenant_id, key_version, wrapped_dek) VALUES ($1, $2, $3)`,
-      [tenantId, version, wrapped],
+      [tenantId, version, toBytea(wrapped)],
     );
     return { version };
   });
@@ -87,7 +107,7 @@ export async function getDek(tenantId: string, version: number): Promise<Buffer>
       [tenantId, version],
     ));
   if (!rows.length) throw new Error('unknown key version');
-  const dek = await unwrapDek(rows[0].wrapped_dek);
+  const dek = await unwrapDek(toBuffer(rows[0].wrapped_dek));
   dekCache.set(key, dek);
   return dek;
 }
@@ -100,14 +120,17 @@ export async function seal(tenantId: string, version: number, plaintext: string)
   const nonce = crypto.randomBytes(12);
   const c = crypto.createCipheriv('aes-256-gcm', dek, nonce);
   const ct = Buffer.concat([c.update(plaintext, 'utf8'), c.final()]);
-  return { ct, nonce, tag: c.getAuthTag() };
+  return { ct: toBytea(ct) as any, nonce: toBytea(nonce) as any, tag: toBytea(c.getAuthTag()) as any };
 }
 
 export async function unseal(tenantId: string, version: number, s: Sealed): Promise<Buffer> {
   const dek = await getDek(tenantId, version);
-  const d = crypto.createDecipheriv('aes-256-gcm', dek, s.nonce);
-  d.setAuthTag(s.tag);
-  return Buffer.concat([d.update(s.ct), d.final()]); // caller MUST zeroize
+  const nonce = toBuffer(s.nonce);
+  const tag = toBuffer(s.tag);
+  const ct = toBuffer(s.ct);
+  const d = crypto.createDecipheriv('aes-256-gcm', dek, nonce);
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]); // caller MUST zeroize
 }
 
 /**

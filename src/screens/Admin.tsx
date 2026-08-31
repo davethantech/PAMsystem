@@ -86,21 +86,32 @@ export function UsersPage() {
     }
     
     try {
-      await api.users.create({
+      const res = await api.users.create({
         name: uform.name,
         email: uform.email,
         role: uform.role,
         title: uform.title,
         collectionIds: uform.cols,
+        sendInvite: false,
       });
       
-      // Refresh users
-      const usersData = await api.users.list();
-      setUsers(usersData);
-      
+      const newUser = {
+        id: res.id || `usr_${Date.now()}`,
+        name: uform.name,
+        email: uform.email,
+        role: uform.role,
+        title: uform.title,
+        status: 'ACTIVE',
+        mfaRequired: false,
+        lastLogin: null,
+        collectionIds: uform.cols,
+        hue: Math.floor(Math.random() * 360),
+      };
+
+      setUsers((prev) => [newUser, ...prev]);
       setAdding(false);
       setUerr('');
-      toast('User created successfully', 'teal');
+      toast(`User "${uform.name}" created successfully`, 'teal');
     } catch (err) {
       setUerr(err instanceof Error ? err.message : 'Failed to create user');
     }

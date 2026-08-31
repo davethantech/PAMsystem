@@ -118,110 +118,149 @@ export function RequestAccessModal({ credId, onClose }: { credId: string | null;
   );
 }
 
-/* ---------------- launch pipeline modal ---------------- */
-const STEPS = [
-  { label: 'Identity & MFA verified', detail: 'session cookie - device bound' },
-  { label: 'RBAC evaluation', detail: 'credential.use yes - credential.reveal no' },
-  { label: 'Launch policy & collection check', detail: 'membership - JIT window - geo/device rules' },
-  { label: 'Single-use grant issued', detail: '30s TTL - tenant+user+app bound' },
-  { label: 'Broker decrypts in enclave', detail: 'plaintext exists only in KMS-backed memory' },
-  { label: 'Inject via isolated world', detail: 'DOM-opaque - zeroized after submit' },
-];
-
 export function LaunchModal({ app, cred, onClose }: { app: any; cred: any; onClose: () => void }) {
-  const { toast, openLiveSession } = usePam();
-  const [step, setStep] = useState(0);
-  const [grant, setGrant] = useState<any>(null);
-  const [error, setError] = useState('');
-  const consumed = useRef(false);
-  const stepMs = REDUCED_MOTION ? 120 : 520;
+  const { toast } = usePam();
+  const [session, setSession] = useState<any>(null);
+  const [status, setStatus] = useState<string>('STARTING');
+  const [error, setError] = useState<string>('');
+  const [challengeMsg, setChallengeMsg] = useState<string>('');
+  const launchedRef = useRef(false);
 
   useEffect(() => {
-    if (step < STEPS.length) {
-      const timer = window.setTimeout(() => setStep((s) => s + 1), stepMs);
-      return () => window.clearTimeout(timer);
-    }
-  }, [step, stepMs]);
+    if (launchedRef.current) return;
+    launchedRef.current = true;
+
+    const startLaunch = async () => {
+      try {
+        setStatus('STARTING');
+        const res = await api.launchSessions.launch(app.id);
+        setSession(res);
+        setStatus(res.status || 'STARTING');
+        toast(`Launching ${app.name} in Playwright Chromium...`, 'teal');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Launch failed');
+        setStatus('FAILED');
+      }
+    };
+
+    startLaunch();
+  }, [app, toast]);
 
   useEffect(() => {
-    if (step === STEPS.length && !consumed.current) {
-      consumed.current = true;
-      const doLaunch = async () => {
-        try {
-          const g = await api.sessions.create({
-            applicationId: app.id,
-            credentialId: cred.id,
-          });
-          setGrant(g);
-          openLiveSession(g);
-          toast('Application launched - authentication brokered', 'teal');
-        } catch (e) {
-          setError(e instanceof Error ? e.message : 'Launch failed');
-        }
-      };
-      doLaunch();
+    if (!session?.sessionId || status === 'AUTHENTICATED' || status === 'FAILED' || status === 'CLOSED') {
+      return;
     }
-  }, [step, app, cred, toast, openLiveSession]);
+
+    const interval = setInterval(async () => {
+      try {
+        const s = await api.launchSessions.get(session.sessionId);
+        setStatus(s.status);
+        if (s.challengeMessage) setChallengeMsg(s.challengeMessage);
+        if (s.error) setError(s.error);
+      } catch {
+        // Polling catch
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [session, status]);
+
+  const handleCloseSession = async () => {
+    if (session?.sessionId) {
+      await api.launchSessions.close(session.sessionId).catch(() => {});
+    }
+    onClose();
+  };
 
   if (error) {
     return (
       <Modal isOpen={!!app} onClose={onClose} title="Launch Error" tone="red">
         <div className="text-center py-4">
           <I n="alert" className="w-12 h-12 mx-auto mb-4 text-red-500" />
-          <p className="text-white">{error}</p>
-          <button className="btn btn-primary mt-4" onClick={onClose}>Close</button>
+          <p className="text-white mb-4">{error}</p>
+          <button className="btn btn-primary" onClick={onClose}>Close</button>
         </div>
       </Modal>
     );
   }
 
+  const stepsList = [
+    { label: 'Authorizing Keyrail launch', detail: 'RBAC evaluation & zero-knowledge policy check' },
+    { label: 'Spawning Playwright Chromium', detail: 'Isolated browser context — no user profile leaks' },
+    { label: 'Navigating to target site', detail: app.url || app.domain },
+    { label: 'Injecting zero-knowledge credentials', detail: 'Brokered in backend enclave memory' },
+    { label: 'Verifying session state', detail: status === 'AUTHENTICATED' ? 'Authenticated' : 'Evaluating DOM state' },
+  ];
+
+  const currentStepIdx = 
+    status === 'STARTING' ? 1 :
+    status === 'AUTHENTICATING' ? 3 :
+    status === 'AUTHENTICATED' || status === 'CHALLENGE_REQUIRED' ? 5 : 2;
+
   return (
-    <Modal isOpen={!!app} onClose={onClose} title="Launching Application" tone="teal">
+    <Modal isOpen={!!app} onClose={handleCloseSession} title={`Launching ${app.name}`} tone="teal">
       <div className="space-y-4">
         <div className="flex items-center gap-4">
           <AppGlyph app={app} size={48} />
           <div>
-            <div className="font-semibold text-white">{app.name}</div>
-            <div className="font-mono text-[11px] text-[var(--dim)]">{app.kind} - {cred.name}</div>
+            <div className="font-semibold text-white text-base">{app.name}</div>
+            <div className="font-mono text-[11px] text-[var(--dim)]">{app.kind} • Credential: {cred.name}</div>
           </div>
         </div>
+
         <div className="space-y-2">
-          {STEPS.map((s, i) => (
+          {stepsList.map((s, i) => (
             <div
               key={i}
               className={`flex items-center gap-3 p-3 rounded-lg transition-all ${
-                i === step
+                i < currentStepIdx
+                  ? 'bg-[rgba(58,214,181,0.06)] border border-[rgba(58,214,181,0.2)] text-[var(--teal)]'
+                  : i === currentStepIdx
                   ? 'bg-[rgba(58,214,181,0.12)] border border-[rgba(58,214,181,0.4)] text-[var(--teal)]'
-                  : i < step
-                  ? 'bg-[rgba(58,214,181,0.04)] border border-[rgba(58,214,181,0.15)] text-[var(--dim)]'
                   : 'border border-[var(--line)] text-[var(--mut)]'
               }`}
             >
-              <Dot tone={i <= step ? 'var(--teal)' : 'var(--mut)'} />
+              <Dot tone={i <= currentStepIdx ? 'var(--teal)' : 'var(--mut)'} />
               <div className="flex-1">
-                <div className="font-medium">{s.label}</div>
-                <div className="font-mono text-[10px]">{s.detail}</div>
+                <div className="font-medium text-xs">{s.label}</div>
+                <div className="font-mono text-[10px] text-[var(--dim)]">{s.detail}</div>
               </div>
-              {i === step && !grant && (
+              {i === currentStepIdx && status !== 'AUTHENTICATED' && status !== 'CHALLENGE_REQUIRED' && (
                 <div className="w-4 h-4 border-2 border-[var(--teal)] border-t-transparent rounded-full animate-spin" />
               )}
-              {i === step && grant && (
+              {i < currentStepIdx && (
                 <I n="check" className="w-4 h-4 text-[var(--teal)]" />
               )}
             </div>
           ))}
         </div>
-        {grant && (
-          <div className="p-4 bg-[rgba(58,214,181,0.08)] rounded-lg border border-[rgba(58,214,181,0.25)]">
-            <div className="font-mono text-[9.5px] tracking-[0.16em] text-[var(--dim)] mb-2">LAUNCH GRANTED</div>
-            <div className="flex items-center gap-2">
-              <I n="launch" className="w-4 h-4 text-[var(--teal)]" />
-              <span className="text-[var(--teal)] font-medium">Session active - Expires in {fmtHM(grant.expiresAt - Date.now())}</span>
+
+        {status === 'CHALLENGE_REQUIRED' && (
+          <div className="p-4 bg-amber-500/10 rounded-lg border border-amber-500/30 space-y-2">
+            <div className="font-semibold text-amber-400 text-sm flex items-center gap-2">
+              <I n="alert" className="w-4 h-4" /> Additional Verification Required
             </div>
+            <p className="text-xs text-amber-200/80 leading-relaxed">
+              {challengeMsg || 'Please complete CAPTCHA / 2FA in the visible Chromium window on your screen. Keyrail will automatically detect when verification succeeds.'}
+            </p>
           </div>
         )}
-        <div className="flex gap-3 justify-end">
-          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+
+        {status === 'AUTHENTICATED' && (
+          <div className="p-4 bg-[rgba(58,214,181,0.1)] rounded-lg border border-[rgba(58,214,181,0.3)] space-y-2">
+            <div className="flex items-center gap-2 text-[var(--teal)] font-semibold text-sm">
+              <I n="check" className="w-4 h-4" /> Playwright Session Active
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              The visible Chromium browser window on your screen is authenticated. You can continue using your session.
+            </p>
+          </div>
+        )}
+
+        <div className="flex gap-3 justify-end pt-2">
+          <button className="btn btn-ghost" onClick={handleCloseSession}>
+            {status === 'AUTHENTICATED' ? 'Done / Hide Modal' : 'Cancel & Close Browser'}
+          </button>
         </div>
       </div>
     </Modal>
@@ -277,12 +316,13 @@ export function TargetSessionOverlay() {
           <div className="flex gap-2">
             <button
               onClick={() => {
+                const targetUrl = (liveSession as any).targetUrl || (liveSession as any).url || ((liveSession as any).domain ? ((liveSession as any).domain.startsWith('http') ? (liveSession as any).domain : 'https://' + (liveSession as any).domain) : 'https://www.ebay.com.au/');
                 openLiveSession(null as any);
-                window.open('about:blank', '_blank');
+                window.open(targetUrl, '_blank');
               }}
-              className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+              className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
             >
-              Open Application
+              <I n="launch" className="w-4 h-4" /> Open Application
             </button>
             <button
               onClick={() => openLiveSession(null as any)}
@@ -297,49 +337,196 @@ export function TargetSessionOverlay() {
   );
 }
 
+/* ---------------- add application modal ---------------- */
+export function AddAppModal({ 
+  credentials, 
+  collections, 
+  onClose, 
+  onSuccess 
+}: { 
+  credentials: Credential[]; 
+  collections: any[]; 
+  onClose: () => void; 
+  onSuccess: (newApp: Application) => void; 
+}) {
+  const { toast, refreshApplications } = usePam();
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [kind, setKind] = useState<'WEB' | 'SSH' | 'RDP' | 'DB' | 'NETWORK'>('WEB');
+  const [domain, setDomain] = useState('');
+  const [url, setUrl] = useState('');
+  const [credentialId, setCredentialId] = useState(credentials[0]?.id || '');
+  const [collectionId, setCollectionId] = useState(collections[0]?.id || '');
+  const [err, setErr] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setErr('Application name is required');
+      return;
+    }
+    if (!domain.trim()) {
+      setErr('Target domain or host is required');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await api.applications.create({
+        name: name.trim(),
+        description: description.trim(),
+        kind,
+        domain: domain.trim(),
+        url: url.trim() || (kind === 'WEB' ? `https://${domain.trim()}` : domain.trim()),
+        credentialId: credentialId || credentials[0]?.id || '',
+        collectionId: collectionId || collections[0]?.id || '',
+      });
+
+      const newApp: Application = {
+        id: res.id || `app_${Date.now()}`,
+        name: name.trim(),
+        description: description.trim(),
+        kind,
+        domain: domain.trim(),
+        url: url.trim() || (kind === 'WEB' ? `https://${domain.trim()}` : domain.trim()),
+        credentialId: credentialId || credentials[0]?.id || '',
+        collectionId: collectionId || collections[0]?.id || '',
+        viaConnector: false,
+        authFlow: 'ISOLATED_WORLD_INJECTION',
+      };
+
+      toast(`Application "${name}" created successfully`, 'teal');
+      refreshApplications();
+      onSuccess(newApp);
+      onClose();
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Failed to create application');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title="Add New Application" tone="teal">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {err && (
+          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+            {err}
+          </div>
+        )}
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1">Application Name *</label>
+          <input
+            type="text"
+            className="input w-full"
+            placeholder="e.g. Datadog APM Console"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1">Description</label>
+          <input
+            type="text"
+            className="input w-full"
+            placeholder="e.g. Observability and performance metrics dashboard"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Application Type</label>
+            <select
+              className="input w-full"
+              value={kind}
+              onChange={(e) => setKind(e.target.value as any)}
+            >
+              <option value="WEB">Web App (HTTPS)</option>
+              <option value="DB">Database (Postgres/MySQL)</option>
+              <option value="SSH">SSH Server</option>
+              <option value="RDP">RDP Remote Desktop</option>
+              <option value="NETWORK">Network Device / Router</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Target Host / Domain *</label>
+            <input
+              type="text"
+              className="input w-full"
+              placeholder="e.g. app.datadoghq.com"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1">Target Connection URL</label>
+          <input
+            type="text"
+            className="input w-full font-mono text-xs"
+            placeholder="https://app.datadoghq.com or psql://db-host:5432"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Associated Credential</label>
+            <select
+              className="input w-full"
+              value={credentialId}
+              onChange={(e) => setCredentialId(e.target.value)}
+            >
+              {credentials.map((c) => (
+                <option key={c.id} value={c.id}>{c.name} ({c.target})</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Collection</label>
+            <select
+              className="input w-full"
+              value={collectionId}
+              onChange={(e) => setCollectionId(e.target.value)}
+            >
+              {collections.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="flex gap-3 justify-end pt-4 border-t border-[var(--line)]">
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={isSubmitting}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
+            <I n="plus" className="w-4 h-4 mr-1" />
+            {isSubmitting ? 'Creating...' : 'Create Application'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 /* ---------------- main launcher ---------------- */
 export default function Launcher() {
-  const { user, setRoute, toast } = usePam();
-  const [applications, setApplications] = useState<Application[]>([]);
-  const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [collections, setCollections] = useState<any[]>([]);
+  const { user, setRoute, toast, applications, credentials, collections, refreshApplications, refreshCredentials, refreshCollections } = usePam();
   const [q, setQ] = useState('');
   const [col, setCol] = useState('ALL');
-  const [selected, setSelected] = useState<Application | null>(null);
   const [launching, setLaunching] = useState<{ app: Application; cred: Credential } | null>(null);
   const [requesting, setRequesting] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [isAddingApp, setIsAddingApp] = useState(false);
 
-  // Fetch applications, credentials, and collections
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        
-        // Fetch all in parallel
-        const [apps, creds, cols] = await Promise.all([
-          api.applications.list(),
-          api.credentials.list(),
-          api.collections.list(),
-        ]);
-        
-        setApplications(apps);
-        setCredentials(creds);
-        setCollections(cols);
-        
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : 'Failed to load launcher data';
-        setError(errorMsg);
-        toast(errorMsg, 'red');
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    
-    fetchData();
-  }, [toast]);
+    refreshApplications();
+    refreshCredentials();
+    refreshCollections();
+  }, []);
 
   const isAdmin = ['PAM_ADMIN', 'ORG_ADMIN', 'SUPER_ADMIN', 'SECURITY_ADMIN'].includes(user!.role);
 
@@ -365,25 +552,7 @@ export default function Launcher() {
     }
   }, [credentials, toast]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-teal-500"></div>
-      </div>
-    );
-  }
 
-  if (error) {
-    return (
-      <div className="text-center py-12">
-        <div className="text-red-500 mb-4">
-          <I n="alert" className="w-12 h-12 mx-auto" />
-        </div>
-        <h3 className="text-xl font-semibold text-white mb-2">Error Loading Applications</h3>
-        <p className="text-slate-400">{error}</p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-5 max-w-[1180px]">
@@ -414,7 +583,7 @@ export default function Launcher() {
           {isAdmin && (
             <button 
               className="btn btn-primary btn-sm" 
-              onClick={() => setRoute('settings')}
+              onClick={() => setIsAddingApp(true)}
             >
               <I n="plus" className="w-3.5 h-3.5" /> New application
             </button>
@@ -439,7 +608,7 @@ export default function Launcher() {
               {isAdmin && (
                 <button 
                   className="btn btn-primary mt-4" 
-                  onClick={() => setRoute('settings')}
+                  onClick={() => setIsAddingApp(true)}
                 >
                   <I n="plus" className="w-4 h-4" /> Add your first application
                 </button>
@@ -484,6 +653,16 @@ export default function Launcher() {
           )}
         </div>
       </Reveal>
+
+      {/* Add application modal */}
+      {isAddingApp && (
+        <AddAppModal 
+          credentials={credentials}
+          collections={collections}
+          onClose={() => setIsAddingApp(false)}
+          onSuccess={() => refreshApplications()}
+        />
+      )}
 
       {/* Launch modal */}
       {launching && (

@@ -10,6 +10,8 @@
 import { buildApp } from './routes.js';
 import { pool, redis, cfg, withTenant } from './db.js';
 
+import { startMockTargetServer } from './mockTargetServer.js';
+
 let appPromise: Promise<any> | null = null;
 
 async function getApp() {
@@ -22,6 +24,7 @@ async function getApp() {
 // Standalone server mode
 async function main() {
   const app = await getApp();
+  await startMockTargetServer(9000).catch(() => {});
   await redis.connect().catch(() => app.log.warn('redis unavailable \u2014 session store degraded'));
 
   // periodic: expire grants, JIT windows, idle sessions.
@@ -60,8 +63,7 @@ export const handler = async (req: any, res: any) => {
   app.server.emit('request', req, res);
 };
 
-// Export for Vercel
-module.exports = { handler };
+export default handler;
 
 // Start standalone server if not in Vercel
 if (process.env.VERCEL !== '1') {

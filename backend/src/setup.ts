@@ -79,17 +79,19 @@ export async function initializeSystem(params: {
     const tenant = tenantResult.rows[0];
     
     // 2. Create system roles (if not exist)
-    await client.query(`
-      INSERT INTO roles (name, is_system) VALUES 
-        ('SUPER_ADMIN', true),
-        ('ORG_ADMIN', true),
-        ('PAM_ADMIN', true),
-        ('SECURITY_ADMIN', true),
-        ('AUDITOR', true),
-        ('USER', true),
-        ('READ_ONLY', true)
-      ON CONFLICT (name) DO NOTHING
-    `);
+    const exRoles = await client.query(`SELECT 1 FROM roles WHERE is_system = true`);
+    if (exRoles.rows.length === 0) {
+      await client.query(`
+        INSERT INTO roles (name, is_system) VALUES 
+          ('SUPER_ADMIN', true),
+          ('ORG_ADMIN', true),
+          ('PAM_ADMIN', true),
+          ('SECURITY_ADMIN', true),
+          ('AUDITOR', true),
+          ('USER', true),
+          ('READ_ONLY', true)
+      `);
+    }
     
     // 3. Create permissions (if not exist)
     await client.query(`
@@ -100,7 +102,13 @@ export async function initializeSystem(params: {
         ('credential.create'),
         ('credential.update'),
         ('credential.delete'),
+        ('application.create'),
+        ('application.update'),
+        ('application.delete'),
         ('application.launch'),
+        ('collection.create'),
+        ('collection.update'),
+        ('collection.delete'),
         ('session.start'),
         ('session.terminate'),
         ('session.record.view'),
@@ -163,7 +171,7 @@ export async function initializeSystem(params: {
     // 9. Create the administrator user
     const userResult = await client.query(
       `INSERT INTO users (tenant_id, email, name, password_hash, status, mfa_required)
-       VALUES ($1, $2, $3, $4, 'ACTIVE', true)
+       VALUES ($1, $2, $3, $4, 'ACTIVE', false)
        RETURNING id, email, name, tenant_id`,
       [tenant.id, params.adminEmail.trim().toLowerCase(), params.adminName.trim(), passwordHash]
     );
@@ -176,12 +184,7 @@ export async function initializeSystem(params: {
     );
     
     // 11. Generate and store the tenant DEK (Data Encryption Key)
-    const dek = await generateDek(tenant.id);
-    await client.query(
-      `INSERT INTO encryption_keys (tenant_id, key_version, wrapped_dek, algorithm, state)
-       VALUES ($1, $2, $3, $4, 'ACTIVE')`,
-      [tenant.id, 1, dek.wrappedDek, 'AES-256-GCM']
-    );
+    await generateDek(tenant.id);
     
     // 12. Create default collection
     const collectionResult = await client.query(
@@ -214,11 +217,11 @@ export async function initializeSystem(params: {
     
     // 15. Create initial audit event
     await client.query(
-      `INSERT INTO audit_events (tenant_id, actor_id, actor_name, event_type, result, meta, ip, hash, prev_hash)
+      `INSERT INTO audit_events (tenant_id, actor_id, actor_name, event_type, result, meta, source_ip, hash, prev_hash)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [tenant.id, user.id, params.adminName, 'SYSTEM_INITIALIZED', 'SUCCESS', 
        `Initial setup by ${params.adminName} (${params.adminEmail})`, '0.0.0.0', 
-       '0000000000000000', '0000000000000000']
+       '0000000000000000000000000000000000000000000000000000000000000000', '0000000000000000000000000000000000000000000000000000000000000000']
     );
     
     await client.query('COMMIT');

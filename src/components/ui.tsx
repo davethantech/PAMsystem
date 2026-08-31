@@ -126,21 +126,27 @@ export function Panel({ title, sub, right, children, className = '', icon }: {
   );
 }
 
-export function Modal({ open, onClose, title, children, width = 560, tone }: {
-  open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; width?: number; tone?: 'red' | 'amber' | 'teal';
+export function Modal({ open, isOpen, onClose, title, children, width = 560, size, tone }: {
+  open?: boolean; isOpen?: boolean; onClose: () => void; title: ReactNode; children: ReactNode; width?: number; size?: string; tone?: 'red' | 'amber' | 'teal';
 }) {
+  const isModalOpen = open ?? isOpen ?? false;
+  let resolvedWidth = width;
+  if (size === 'lg') resolvedWidth = 720;
+  else if (size === 'xl') resolvedWidth = 900;
+  else if (size === 'sm') resolvedWidth = 440;
+
   useEffect(() => {
-    if (!open) return;
+    if (!isModalOpen) return;
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [open, onClose]);
-  if (!open) return null;
+  }, [isModalOpen, onClose]);
+  if (!isModalOpen) return null;
   const bar = tone === 'red' ? 'var(--red)' : tone === 'amber' ? 'var(--amber)' : 'var(--teal)';
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-[rgba(4,9,18,0.78)] backdrop-blur-[3px]" onClick={onClose} />
-      <div className="relative panel-solid rise-in max-h-[88vh] overflow-y-auto" style={{ width, maxWidth: '94vw', borderTop: `2px solid ${bar}` }}>
+      <div className="relative panel-solid rise-in max-h-[88vh] overflow-y-auto" style={{ width: resolvedWidth, maxWidth: '94vw', borderTop: `2px solid ${bar}` }}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
           <h3 className="font-display font-semibold text-[16px]">{title}</h3>
           <button onClick={onClose} className="text-[var(--mut)] hover:text-[var(--ink)] transition-colors cursor-pointer" aria-label="Close">
@@ -173,11 +179,11 @@ export function CountRing({ remaining, total, size = 64, label }: { remaining: n
 }
 
 /* ---------- sparkline ---------- */
-export function Spark({ data, tone = 'var(--teal)', h = 42, w = 140 }: { data: number[]; tone?: string; h?: number; w?: number }) {
+export function Spark({ data = [5, 12, 8, 16, 10, 18, 14], tone = 'var(--teal)', h = 42, w = 140, className = '' }: { data?: number[]; tone?: string; h?: number; w?: number; className?: string }) {
   const max = Math.max(...data, 1);
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - 4 - (v / max) * (h - 10)}`).join(' ');
   return (
-    <svg width={w} height={h} className="overflow-visible">
+    <svg width={w} height={h} className={`overflow-visible ${className}`}>
       <polyline points={pts} fill="none" stroke={tone} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" opacity="0.9" />
       <polygon points={`0,${h} ${pts} ${w},${h}`} fill={tone} opacity="0.08" />
       <circle cx={w} cy={h - 4 - (data[data.length - 1] / max) * (h - 10)} r="2.6" fill={tone} />
@@ -198,7 +204,7 @@ export function Toggle({ on, onChange, disabled }: { on: boolean; onChange: (v: 
 }
 
 /* ---------- status pill ---------- */
-export function StatusPill({ status }: { status: string }) {
+export function StatusPill({ status, children }: { status: string; children?: ReactNode }) {
   const map: Record<string, { tone: string; label: string }> = {
     ACTIVE: { tone: 'teal', label: 'ACTIVE' },
     SUCCESS: { tone: 'teal', label: 'SUCCESS' },
@@ -217,5 +223,5 @@ export function StatusPill({ status }: { status: string }) {
     DISABLED: { tone: '', label: 'DISABLED' },
   };
   const m = map[status] ?? { tone: '', label: status };
-  return <Chip tone={m.tone}>{m.label}</Chip>;
+  return <Chip tone={m.tone}>{children ?? m.label}</Chip>;
 }

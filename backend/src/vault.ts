@@ -12,7 +12,7 @@
  */
 import crypto from 'node:crypto';
 import { pool, withTenant, HttpError, cfg, redis } from './db.js';
-import { seal, withUnsealedSecret, randomToken, sha256, rotateTenantDek, type Sealed } from './crypto.js';
+import { seal, withUnsealedSecret, randomToken, sha256, rotateTenantDek, toBytea, toBuffer, type Sealed } from './crypto.js';
 import { audit } from './audit.js';
 import type { Principal } from './auth.js';
 
@@ -27,13 +27,14 @@ export async function createCredential(p: Principal, input: {
     const version = kv[0]?.key_version ?? 1;
     const sSecret = await seal(p.tenantId, version, input.secret);
     const sUser = await seal(p.tenantId, version, input.username);
+    const sUserCombined = toBytea(Buffer.concat([toBuffer(sUser.ct), toBuffer(sUser.tag)]));
     const ins = await client.query(
       `INSERT INTO credentials
         (tenant_id, name, target, kind, username_encrypted, username_nonce,
          secret_ciphertext, secret_nonce, secret_tag, key_version, secret_length,
          rotation_policy, access, jit_window_min, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
-      [p.tenantId, input.name, input.target, input.kind, sUser.ct, sUser.nonce,
+      [p.tenantId, input.name, input.target, input.kind, sUserCombined, sUser.nonce,
        sSecret.ct, sSecret.nonce, sSecret.tag, version, input.secret.length,
        input.rotationPolicy, input.access, input.jitWindowMin ?? null, p.userId]);
     for (const cid of input.collectionIds)
@@ -160,6 +161,90 @@ export async function consumeGrant(p: Principal, token: string, perform: (op: { 
     await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'CREDENTIAL_USED', resourceId: g.credential_id, resourceName: g.cred_name, meta: 'decrypted in broker enclave · zeroized after use' });
     await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'SESSION_STARTED', resourceId: session, resourceName: g.app_name });
     return { sessionId: session };
+  });
+}
+
+import { launchApplicationSession } from './browserManager.js';
+
+export async function launchBrowserSession(p: Principal, applicationId: string) {
+  return withTenant(p.tenantId, async (client) => {
+    const { rows: apps } = await client.query(
+      `SELECT a.id, a.name, a.kind, a.domain, a.url, a.login_selectors, ac.credential_id
+         FROM applications a
+         LEFT JOIN application_credentials ac ON ac.application_id = a.id
+        WHERE a.id = $1 AND a.tenant_id = $2`,
+      [applicationId, p.tenantId]
+    );
+
+    if (!apps.length) throw new HttpError(404, 'APPLICATION_NOT_FOUND', 'Application not found');
+    const app = apps[0];
+
+    const credentialId = app.credential_id;
+    if (!credentialId) throw new HttpError(400, 'NO_CREDENTIAL_LINKED', 'Application has no associated credential');
+
+    const { rows: creds } = await client.query(
+      `SELECT id, name, target, kind, key_version, secret_ciphertext, secret_nonce, secret_tag,
+              username_encrypted, username_nonce
+         FROM credentials WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+      [credentialId, p.tenantId]
+    );
+
+    if (!creds.length) throw new HttpError(404, 'CREDENTIAL_NOT_FOUND', 'Associated credential not found');
+    const cred = creds[0];
+
+    const secretSealed: Sealed = { ct: cred.secret_ciphertext, nonce: cred.secret_nonce, tag: cred.secret_tag };
+
+    let username = '';
+    if (cred.username_encrypted) {
+      const rawUserCt = toBuffer(cred.username_encrypted);
+      let userSealed: Sealed;
+      if (rawUserCt.length >= 16) {
+        const ctPart = rawUserCt.subarray(0, rawUserCt.length - 16);
+        const tagPart = rawUserCt.subarray(rawUserCt.length - 16);
+        userSealed = { ct: toBytea(ctPart) as any, nonce: cred.username_nonce, tag: toBytea(tagPart) as any };
+      } else {
+        userSealed = { ct: cred.username_encrypted, nonce: cred.username_nonce, tag: cred.secret_tag };
+      }
+      await withUnsealedSecret(p.tenantId, cred.key_version, userSealed, async (u) => { username = u; }).catch(() => { username = ''; });
+    }
+
+    const sessionId = `ses_${randomToken(16)}`;
+
+    await audit({ tenantId: p.tenantId, actorId: p.userId, actorName: p.name, type: 'APPLICATION_LAUNCHED', resourceId: app.id, resourceName: app.name, meta: 'Playwright headed Chromium launch requested' });
+
+    let sessionStatus = 'STARTING';
+    await withUnsealedSecret(p.tenantId, cred.key_version, secretSealed, async (secret) => {
+      const session = await launchApplicationSession({
+        sessionId,
+        userId: p.userId,
+        tenantId: p.tenantId,
+        applicationId: app.id,
+        appName: app.name,
+        credentialId: cred.id,
+        credentialName: cred.name,
+        targetUrl: app.url || `https://${app.domain}`,
+        domain: app.domain,
+        username,
+        password: secret,
+        usernameSelector: app.login_selectors?.username,
+        passwordSelector: app.login_selectors?.password,
+        submitSelector: app.login_selectors?.submit,
+        successUrlPattern: app.login_selectors?.successUrlPattern,
+        successSelector: app.login_selectors?.successSelector,
+        autoSubmit: true,
+      });
+      sessionStatus = session.status;
+    });
+
+    await client.query(`UPDATE credentials SET last_used_at = now() WHERE id = $1`, [cred.id]);
+
+    return {
+      sessionId,
+      status: sessionStatus,
+      targetUrl: app.url,
+      appName: app.name,
+      credentialName: cred.name,
+    };
   });
 }
 

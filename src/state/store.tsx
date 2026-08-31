@@ -7,7 +7,7 @@
  * All state comes from PostgreSQL via the backend API.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { api, type ApiError } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type {
   User,
   SessionUser,
@@ -33,6 +33,7 @@ interface Ctx {
   // State
   phase: Phase;
   user: SessionUser | null;
+  tenant: any;
   route: Route;
   setRoute: (r: Route) => void;
   
@@ -148,9 +149,9 @@ export function PamProvider({ children }: { children: ReactNode }) {
   
   const toastId = useRef(0);
 
-  // Timer for tick
+  // Timer for tick (only tick every 10 seconds for general time updates)
   useEffect(() => {
-    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    const id = window.setInterval(() => setTick((t) => t + 1), 10000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -164,7 +165,6 @@ export function PamProvider({ children }: { children: ReactNode }) {
   // Check initial setup on mount
   const checkInitialSetup = useCallback(async () => {
     try {
-      setLoading(true);
       const result = await api.auth.checkInitialSetup();
       if (result.requiresSetup) {
         setPhase('setup');
@@ -266,7 +266,7 @@ export function PamProvider({ children }: { children: ReactNode }) {
       // In production, this would open a popup or redirect
       const provider = p.toLowerCase();
       const tenantSlug = localStorage.getItem('tenantSlug') || 'default';
-      window.location.href = `${import.meta.env.NEXT_PUBLIC_API_URL || ''}/auth/${provider}/callback?tenant=${tenantSlug}`;
+      window.location.href = `${(import.meta as any).env?.NEXT_PUBLIC_API_URL || (import.meta as any).env?.VITE_API_URL || ''}/auth/${provider}/callback?tenant=${tenantSlug}`;
     } catch (error) {
       const msg = error instanceof ApiError ? error.message : 'SSO login failed';
       toast(msg, 'red');
@@ -425,20 +425,15 @@ export function PamProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshAll = useCallback(async () => {
-    try {
-      setLoading(true);
-      await Promise.all([
-        refreshUsers(),
-        refreshCollections(),
-        refreshCredentials(),
-        refreshApplications(),
-        refreshSessions(),
-        refreshRequests(),
-        refreshAudit(),
-      ]);
-    } finally {
-      setLoading(false);
-    }
+    await Promise.all([
+      refreshUsers(),
+      refreshCollections(),
+      refreshCredentials(),
+      refreshApplications(),
+      refreshSessions(),
+      refreshRequests(),
+      refreshAudit(),
+    ]).catch(() => {});
   }, [refreshUsers, refreshCollections, refreshCredentials, refreshApplications, refreshSessions, refreshRequests, refreshAudit]);
 
   // Session management
@@ -446,9 +441,23 @@ export function PamProvider({ children }: { children: ReactNode }) {
   const closeLiveSession = useCallback(() => setLiveSession(null), []);
 
   // Permission check
+  const checkUserPermission = useCallback((u: SessionUser | null, perm: string): boolean => {
+    if (!u) return false;
+    if (u.role === 'SUPER_ADMIN' || u.role === 'ORG_ADMIN') return true;
+    if (u.role === 'PAM_ADMIN' && !perm.includes('reveal')) return true;
+    if (u.role === 'SECURITY_ADMIN') return true;
+    if (u.role === 'USER') {
+      if (perm === 'credential.use' || perm === 'credential.list' || perm === 'application.launch') return true;
+    }
+    if (u.role === 'READ_ONLY') {
+      if (perm === 'credential.list' || perm === 'application.list') return true;
+    }
+    return false;
+  }, []);
+
   const hasPermission = useCallback(
-    (perm: string) => hasPermission(user, perm),
-    [user]
+    (perm: string) => checkUserPermission(user, perm),
+    [user, checkUserPermission]
   );
 
   // Check if user can use a credential
@@ -460,15 +469,13 @@ export function PamProvider({ children }: { children: ReactNode }) {
       if (!cred) return false;
       
       // Check if user has credential.use permission
-      if (!hasPermission(user, 'credential.use')) return false;
+      if (!hasPermission('credential.use')) return false;
       
       // Check if credential is in a collection the user has access to
-      // This is a simplified check - in production, this comes from the backend
       if (user.role === 'SUPER_ADMIN' || user.role === 'ORG_ADMIN' || user.role === 'PAM_ADMIN') {
         return true;
       }
       
-      // For now, assume all users can use all credentials they can see
       return true;
     },
     [user, credentials, hasPermission]
@@ -488,12 +495,13 @@ export function PamProvider({ children }: { children: ReactNode }) {
   // Check initial setup on mount
   useEffect(() => {
     checkInitialSetup();
-  }, [checkInitialSetup]);
+  }, []);
 
   const value = useMemo<Ctx>(() => ({
     // State
     phase,
     user,
+    tenant: null,
     route,
     setRoute,
     

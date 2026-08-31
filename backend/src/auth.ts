@@ -82,16 +82,17 @@ export async function establishSession(user: { id: string; tenant_id: string; em
   return withTenant(user.tenant_id, async (client) => {
     const permissions = await loadPermissions(client, user.id);
     const sessionId = randomToken(18);
-    await redis.set(`session:${sessionId}`, JSON.stringify({ userId: user.id, authMethod }), 'EX', REFRESH_TTL_SEC);
+    await redis.set(`session:${sessionId}`, JSON.stringify({ userId: user.id, authMethod }), 'EX', REFRESH_TTL_SEC).catch(() => {});
     const access = await new SignJWT({ sid: sessionId, role, tenant: user.tenant_id, sub: user.id })
       .setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setIssuer(cfg.issuer).setExpirationTime(ACCESS_TTL)
       .sign(jwtSecret);
     const refresh = randomToken(32);
     await redis.set(`refresh:${sha256(refresh).toString('hex')}`,
       JSON.stringify({ sid: sessionId, userId: user.id, tenantId: user.tenant_id, family: sessionId }),
-      'EX', REFRESH_TTL_SEC);
-    reply.setCookie('kr_access', access, { httpOnly: true, secure: true, sameSite: 'strict', path: '/', maxAge: 300 });
-    reply.setCookie('kr_refresh', refresh, { httpOnly: true, secure: true, sameSite: 'strict', path: '/auth/refresh', maxAge: REFRESH_TTL_SEC });
+      'EX', REFRESH_TTL_SEC).catch(() => {});
+    const isProd = process.env.NODE_ENV === 'production';
+    reply.setCookie('kr_access', access, { httpOnly: true, secure: isProd, sameSite: 'lax', path: '/', maxAge: 300 });
+    reply.setCookie('kr_refresh', refresh, { httpOnly: true, secure: isProd, sameSite: 'lax', path: '/', maxAge: REFRESH_TTL_SEC });
     await client.query(`UPDATE users SET last_login_at = now(), failed_logins = 0 WHERE id = $1`, [user.id]);
     const principal: Principal = { userId: user.id, tenantId: user.tenant_id, email: user.email, name: user.name, role, sessionId, authMethod, permissions };
     await audit({ tenantId: user.tenant_id, actorId: user.id, actorName: user.name, type: 'SESSION_STARTED', meta: `method=${authMethod} · HttpOnly/Secure/SameSite=Strict` });

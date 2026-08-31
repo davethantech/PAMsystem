@@ -31,47 +31,205 @@ const KIND_LABEL: Record<string, string> = {
   SECRET: 'Secret'
 };
 
+/* ---------------- add credential modal ---------------- */
+export function AddCredentialModal({ 
+  collections, 
+  onClose, 
+  onSuccess 
+}: { 
+  collections: any[]; 
+  onClose: () => void; 
+  onSuccess: (newCred: Credential) => void; 
+}) {
+  const { toast, refreshCredentials } = usePam();
+  const [name, setName] = useState('');
+  const [target, setTarget] = useState('');
+  const [username, setUsername] = useState('');
+  const [secret, setSecret] = useState('');
+  const [kind, setKind] = useState<'PASSWORD' | 'API_KEY' | 'SSH_KEY' | 'TOKEN' | 'SECURE_NOTE'>('PASSWORD');
+  const [access, setAccess] = useState<'PERMANENT' | 'APPROVAL_REQUIRED' | 'ONE_TIME'>('PERMANENT');
+  const [collectionId, setCollectionId] = useState(collections[0]?.id || '');
+  const [err, setErr] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setErr('Credential name is required');
+      return;
+    }
+    if (!target.trim()) {
+      setErr('Target domain or host is required');
+      return;
+    }
+    if (!username.trim()) {
+      setErr('Username or account ID is required');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await api.credentials.create({
+        name: name.trim(),
+        target: target.trim(),
+        kind,
+        username: username.trim(),
+        secret: secret.trim() || 'dummy_encrypted_secret',
+        collectionIds: collectionId ? [collectionId] : [],
+        access,
+        rotationPolicy: '90_DAYS',
+      });
+
+      const newCred: Credential = {
+        id: res.id || `cred_${Date.now()}`,
+        name: name.trim(),
+        target: target.trim(),
+        kind,
+        username: username.trim(),
+        keyVersion: res.keyVersion || 1,
+        rotationPolicy: '90_DAYS',
+        access,
+        health: 'VERIFIED',
+        rotatedAt: new Date().toISOString(),
+        secretLength: secret.length || 24,
+        createdAt: new Date().toISOString(),
+        collectionIds: collectionId ? [collectionId] : [],
+      };
+
+      toast(`Credential "${name}" created successfully`, 'teal');
+      refreshCredentials();
+      onSuccess(newCred);
+      onClose();
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Failed to create credential');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title="Add New Credential" tone="teal">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {err && (
+          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+            {err}
+          </div>
+        )}
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1">Credential Name *</label>
+          <input
+            type="text"
+            className="input w-full"
+            placeholder="e.g. AWS Production Admin"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Target Host / Domain *</label>
+            <input
+              type="text"
+              className="input w-full"
+              placeholder="e.g. aws.amazon.com"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Account / Username *</label>
+            <input
+              type="text"
+              className="input w-full"
+              placeholder="e.g. admin-user"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1">Secret / Password</label>
+          <input
+            type="password"
+            className="input w-full font-mono text-xs"
+            placeholder="●●●●●●●●●●●● (Encrypted server-side)"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+          />
+        </div>
+        <div className="grid grid-cols-3 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Credential Type</label>
+            <select
+              className="input w-full"
+              value={kind}
+              onChange={(e) => setKind(e.target.value as any)}
+            >
+              <option value="PASSWORD">Password</option>
+              <option value="API_KEY">API Key</option>
+              <option value="SSH_KEY">SSH Private Key</option>
+              <option value="TOKEN">OAuth Token</option>
+              <option value="SECURE_NOTE">Secure Note</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Access Policy</label>
+            <select
+              className="input w-full"
+              value={access}
+              onChange={(e) => setAccess(e.target.value as any)}
+            >
+              <option value="PERMANENT">Permanent Access</option>
+              <option value="APPROVAL_REQUIRED">Approval Required (JIT)</option>
+              <option value="ONE_TIME">One-Time Use</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Collection</label>
+            <select
+              className="input w-full"
+              value={collectionId}
+              onChange={(e) => setCollectionId(e.target.value)}
+            >
+              {collections.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="flex gap-3 justify-end pt-4 border-t border-[var(--line)]">
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={isSubmitting}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
+            <I n="plus" className="w-4 h-4 mr-1" />
+            {isSubmitting ? 'Creating...' : 'Create Credential'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 export default function Vault() {
-  const { user, setRoute, toast } = usePam();
-  const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [collections, setCollections] = useState<any[]>([]);
+  const { user, setRoute, toast, credentials, collections, refreshCredentials, refreshCollections } = usePam();
   const [q, setQ] = useState('');
   const [col, setCol] = useState('ALL');
   const [selected, setSelected] = useState<Credential | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [isAddingCred, setIsAddingCred] = useState(false);
 
-  // Fetch credentials and collections
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        
-        // Fetch credentials
-        const creds = await api.credentials.list();
-        setCredentials(creds);
-        
-        // Fetch collections
-        const cols = await api.collections.list();
-        setCollections(cols);
-        
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : 'Failed to load credentials';
-        setError(errorMsg);
-        toast(errorMsg, 'red');
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    
-    fetchData();
-  }, [toast]);
+    refreshCredentials();
+    refreshCollections();
+  }, []);
 
   const isAdmin = ['PAM_ADMIN', 'ORG_ADMIN', 'SUPER_ADMIN', 'SECURITY_ADMIN'].includes(user!.role);
 
   const list = useMemo(() => credentials.filter((c) => {
-    if (col !== 'ALL' && c.collectionId !== col) return false;
+    if (col !== 'ALL' && !c.collectionIds?.includes(col)) return false;
     if (q && !`${c.name} ${c.target} ${c.username}`.toLowerCase().includes(q.toLowerCase())) return false;
     return true;
   }), [credentials, q, col]);
@@ -94,32 +252,14 @@ export default function Vault() {
     
     try {
       await api.credentials.delete(credId);
-      setCredentials(prev => prev.filter(c => c.id !== credId));
+      refreshCredentials();
       toast(`"${credName}" deleted`, 'teal');
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Delete failed', 'red');
     }
-  }, [toast]);
+  }, [refreshCredentials, toast]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-teal-500"></div>
-      </div>
-    );
-  }
 
-  if (error) {
-    return (
-      <div className="text-center py-12">
-        <div className="text-red-500 mb-4">
-          <I n="alert" className="w-12 h-12 mx-auto" />
-        </div>
-        <h3 className="text-xl font-semibold text-white mb-2">Error Loading Vault</h3>
-        <p className="text-slate-400">{error}</p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-5 max-w-[1180px]">
@@ -150,7 +290,7 @@ export default function Vault() {
           {isAdmin && (
             <button 
               className="btn btn-primary btn-sm" 
-              onClick={() => setRoute('settings')}
+              onClick={() => setIsAddingCred(true)}
             >
               <I n="plus" className="w-3.5 h-3.5" /> New credential
             </button>
@@ -174,7 +314,7 @@ export default function Vault() {
               {isAdmin && (
                 <button 
                   className="btn btn-primary mt-4" 
-                  onClick={() => setRoute('settings')}
+                  onClick={() => setIsAddingCred(true)}
                 >
                   <I n="plus" className="w-4 h-4" /> Add your first credential
                 </button>
@@ -213,10 +353,10 @@ export default function Vault() {
                       <td className="py-3 pr-4 font-mono text-[11px]">{c.target}</td>
                       <td className="py-3 pr-4 font-mono text-[11px]">{c.username}</td>
                       <td className="py-3 pr-4">
-                        {collections.find(col => col.id === c.collectionId)?.name || 'N/A'}
+                        {collections.filter(col => c.collectionIds?.includes(col.id)).map(col => col.name).join(', ') || 'Default'}
                       </td>
                       <td className="py-3 pr-4 font-mono text-[9.5px] text-[var(--dim)]">
-                        {timeAgo(c.createdAt)}
+                        {timeAgo(new Date(c.createdAt).getTime())}
                       </td>
                       <td className="py-3">
                         <div className="flex gap-2">
@@ -255,6 +395,15 @@ export default function Vault() {
           )}
         </div>
       </Reveal>
+
+      {/* Add credential modal */}
+      {isAddingCred && (
+        <AddCredentialModal 
+          collections={collections}
+          onClose={() => setIsAddingCred(false)}
+          onSuccess={() => refreshCredentials()}
+        />
+      )}
 
       {selected && (
         <Modal isOpen={!!selected} onClose={() => setSelected(null)} title="Credential Details">
