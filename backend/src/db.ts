@@ -1,16 +1,15 @@
 /**
- * Data access — PostgreSQL (private subnet only) + Redis (cache/queue).
- *
- * Tenant isolation strategy: the application role is a NON-superuser with
- * FORCE ROW LEVEL SECURITY on every tenant table. `withTenant()` pins
- * `app.tenant_id` for the transaction, so even a buggy query cannot leak
- * rows across tenants. Tenant ids are ALWAYS derived from the verified
- * session (see routes.ts) — never from request bodies or query params.
+ * Keyrail data access.
+ * Production is PostgreSQL + Redis only.
+ * pg-mem exists solely for explicit development/test mode and is never selected
+ * silently when production PostgreSQL is unavailable.
  */
 import pg from 'pg';
 import Redis from 'ioredis';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { newDb, DataType } from 'pg-mem';
 
 export const cfg = {
   port: Number(process.env.PORT ?? 8080),
@@ -18,188 +17,106 @@ export const cfg = {
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
   kmsProvider: (process.env.KMS_PROVIDER ?? 'local') as 'aws' | 'local',
   kmsKeyId: process.env.KMS_KEY_ID ?? '',
-  cookieSecret: process.env.COOKIE_SECRET ?? 'change-me-64-bytes',
+  cookieSecret: process.env.COOKIE_SECRET ?? '',
   sessionTtlMin: Number(process.env.SESSION_TTL_MIN ?? 120),
   idleTimeoutMin: Number(process.env.IDLE_TIMEOUT_MIN ?? 15),
   grantTtlSec: 30,
   issuer: process.env.ISSUER ?? 'https://pam.keyrail.cloud',
+  nodeEnv: process.env.NODE_ENV ?? 'development',
 };
 
-import crypto from 'node:crypto';
-import { newDb, DataType } from 'pg-mem';
+const isProduction = cfg.nodeEnv === 'production';
+if (isProduction) {
+  if (!cfg.cookieSecret || cfg.cookieSecret === 'change-me-64-bytes') {
+    throw new Error('COOKIE_SECRET must be set to a strong random value in production');
+  }
+  if (cfg.kmsProvider === 'aws' && !cfg.kmsKeyId) {
+    throw new Error('KMS_KEY_ID is required when KMS_PROVIDER=aws');
+  }
+}
 
 const realPool = new pg.Pool({
   connectionString: cfg.databaseUrl,
-  max: 20,
-  connectionTimeoutMillis: 2000,
-  ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  max: Number(process.env.PG_POOL_MAX ?? 20),
+  connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 2000),
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30000),
+  ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED !== 'false' } : undefined,
+  application_name: 'keyrail-api',
 });
 
 let memPool: any = null;
-let initializedMemDb = false;
 let isUsingFallback = false;
 
 async function getMemPool() {
   if (!memPool) {
     const db = newDb({ autoCreateForeignKeyIndices: true });
-    db.public.registerFunction({
-      name: 'gen_random_uuid',
-      returns: DataType.uuid,
-      implementation: () => crypto.randomUUID(),
-      impure: true,
-    });
-    db.public.registerFunction({
-      name: 'uuid_generate_v4',
-      returns: DataType.uuid,
-      implementation: () => crypto.randomUUID(),
-      impure: true,
-    });
-    db.public.registerFunction({
-      name: 'set_config',
-      args: [DataType.text, DataType.text, DataType.bool],
-      returns: DataType.text,
-      implementation: (_setting, value) => value,
-    });
-    db.public.registerFunction({
-      name: 'char_length',
-      args: [DataType.text],
-      returns: DataType.integer,
-      implementation: (str: string) => (str ? str.length : 0),
-    });
-    db.public.registerFunction({
-      name: 'convert_from',
-      args: [DataType.bytea, DataType.text],
-      returns: DataType.text,
-      implementation: (buf: any) => (buf ? Buffer.from(buf).toString('utf8') : ''),
-    });
-    db.public.registerFunction({
-      name: 'hashtext',
-      args: [DataType.text],
-      returns: DataType.integer,
-      implementation: (_text: string) => 12345,
-    });
-    db.public.registerFunction({
-      name: 'pg_advisory_xact_lock',
-      args: [DataType.integer],
-      returns: DataType.null,
-      implementation: () => null,
-    });
-    
-    // Run migrations on pg-mem instance
-    try {
-      const migrationsDir = path.resolve(process.cwd(), '../database/migrations');
-      if (fs.existsSync(migrationsDir)) {
-        const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
-        for (const f of files) {
-          let sql = fs.readFileSync(path.join(migrationsDir, f), 'utf8');
-          sql = sql
-            .replace(/CREATE EXTENSION IF NOT EXISTS [^;]+;/gi, '')
-            .replace(/CREATE OR REPLACE FUNCTION [\s\S]*?LANGUAGE plpgsql;/gi, '')
-            .replace(/CREATE TRIGGER [^;]+;/gi, '')
-            .replace(/EXECUTE FUNCTION [^;]+;/gi, '')
-            .replace(/CREATE TABLE applications \([\s\S]*?via_connector uuid REFERENCES connectors_stub[\s\S]*?\);/gi, '')
-            .replace(/DROP TABLE IF EXISTS applications CASCADE;/gi, '')
-            .replace(/INSERT INTO permissions [\s\S]*?DO NOTHING;/gi, '')
-            .replace(/INSERT INTO roles [\s\S]*?DO NOTHING;/gi, '')
-            .replace(/DO \$\$[\s\S]*?END \$\$;/gi, '')
-            .replace(/CREATE POLICY [^;]+;/gi, '')
-            .replace(/CHECK\s*\(\s*char_length\([^)]+\)\s*>=?\s*\d+\s*\)/gi, '')
-            .replace(/ALTER TABLE [^;]+ (ENABLE|FORCE) ROW LEVEL SECURITY;/gi, '');
-          db.public.none(sql);
-        }
+    db.public.registerFunction({ name: 'gen_random_uuid', returns: DataType.uuid, implementation: () => crypto.randomUUID(), impure: true });
+    db.public.registerFunction({ name: 'uuid_generate_v4', returns: DataType.uuid, implementation: () => crypto.randomUUID(), impure: true });
+    db.public.registerFunction({ name: 'set_config', args: [DataType.text, DataType.text, DataType.bool], returns: DataType.text, implementation: (_s, v) => v });
+    db.public.registerFunction({ name: 'char_length', args: [DataType.text], returns: DataType.integer, implementation: (s: string) => (s ? s.length : 0) });
+    db.public.registerFunction({ name: 'convert_from', args: [DataType.bytea, DataType.text], returns: DataType.text, implementation: (b: any) => (b ? Buffer.from(b).toString('utf8') : '') });
+    db.public.registerFunction({ name: 'hashtext', args: [DataType.text], returns: DataType.integer, implementation: () => 12345 });
+    db.public.registerFunction({ name: 'pg_advisory_xact_lock', args: [DataType.integer], returns: DataType.null, implementation: () => null });
+    const migrationsDir = path.resolve(process.cwd(), '../database/migrations');
+    if (fs.existsSync(migrationsDir)) {
+      const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+      for (const f of files) {
+        let sql = fs.readFileSync(path.join(migrationsDir, f), 'utf8');
+        sql = sql
+          .replace(/CREATE EXTENSION IF NOT EXISTS [^;]+;/gi, '')
+          .replace(/CREATE OR REPLACE FUNCTION [\s\S]*?LANGUAGE plpgsql;/gi, '')
+          .replace(/CREATE TRIGGER [^;]+;/gi, '')
+          .replace(/EXECUTE FUNCTION [^;]+;/gi, '')
+          .replace(/CREATE POLICY [^;]+;/gi, '')
+          .replace(/ALTER TABLE [^;]+ (ENABLE|FORCE) ROW LEVEL SECURITY;/gi, '');
+        try { db.public.none(sql); } catch (e) { console.warn(`[DB] dev pg-mem migration note (${f}):`, e instanceof Error ? e.message : e); }
       }
-    } catch (e) {
-      console.warn('[DB] Migration note error:', e);
     }
-
-    const adapter = db.adapters.createPg();
-    memPool = new adapter.Pool();
-
-    // Restore persistent disk state if available
+    memPool = db.adapters.createPg().Pool;
+    console.warn('[DB] DEVELOPMENT fallback active: pg-mem. Persistent JSON state is development-only.');
     await loadDiskState();
-    console.log('[DB] Database schema initialized with persistent storage support.');
   }
   return memPool;
 }
 
 const DUMP_PATH = path.resolve(process.cwd(), 'data', 'db_state.json');
-
 export async function saveDiskState() {
-  if (!memPool) return;
+  if (isProduction || !memPool) return;
+  const dataDir = path.dirname(DUMP_PATH);
   try {
-    const dataDir = path.dirname(DUMP_PATH);
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-    const tables = [
-      'tenants', 'roles', 'permissions', 'role_permissions', 'users', 'user_roles',
-      'encryption_keys', 'collections', 'collection_members', 'credentials',
-      'credential_versions', 'credential_collections', 'connectors', 'applications',
-      'application_credentials', 'access_policies', 'access_requests', 'approvals',
-      'launch_grants', 'sessions', 'session_events', 'audit_events', 'devices',
-      'mfa_methods', 'api_keys', 'password_rotation_jobs', 'notifications'
-    ];
-
+    const tables = ['tenants','roles','permissions','role_permissions','users','user_roles','encryption_keys','collections','collection_members','credentials','credential_versions','credential_collections','connectors','applications','application_credentials','access_policies','access_requests','approvals','launch_grants','sessions','session_events','audit_events','devices','mfa_methods','api_keys','password_rotation_jobs','notifications'];
     const dump: Record<string, any[]> = {};
     for (const table of tables) {
-      try {
-        const { rows } = await memPool.query(`SELECT * FROM ${table}`);
-        if (rows && rows.length > 0) {
-          dump[table] = rows;
-        }
-      } catch {}
+      try { const { rows } = await memPool.query(`SELECT * FROM ${table}`); if (rows?.length) dump[table] = rows; } catch {}
     }
-    fs.writeFileSync(DUMP_PATH, JSON.stringify(dump, null, 2), 'utf8');
-  } catch (e) {
-    console.warn('[DB] Persistent disk save note:', e);
-  }
+    const tmp = `${DUMP_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(dump), 'utf8');
+    fs.renameSync(tmp, DUMP_PATH);
+  } catch (e) { console.warn('[DB] Development persistence save failed:', e instanceof Error ? e.message : e); }
 }
-
 let saveTimer: NodeJS.Timeout | null = null;
 export function scheduleSave() {
+  if (isProduction || !memPool) return;
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveDiskState();
-  }, 100);
+  saveTimer = setTimeout(() => { void saveDiskState(); }, 100);
 }
 
 export async function loadDiskState() {
-  if (!memPool || !fs.existsSync(DUMP_PATH)) return;
+  if (isProduction || !memPool || !fs.existsSync(DUMP_PATH)) return;
   try {
-    const content = fs.readFileSync(DUMP_PATH, 'utf8');
-    const dump: Record<string, any[]> = JSON.parse(content);
-
-    const tables = [
-      'tenants', 'roles', 'permissions', 'role_permissions', 'users', 'user_roles',
-      'encryption_keys', 'collections', 'collection_members', 'credentials',
-      'credential_versions', 'credential_collections', 'connectors', 'applications',
-      'application_credentials', 'access_policies', 'access_requests', 'approvals',
-      'launch_grants', 'sessions', 'session_events', 'audit_events', 'devices',
-      'mfa_methods', 'api_keys', 'password_rotation_jobs', 'notifications'
-    ];
-
+    const dump: Record<string, any[]> = JSON.parse(fs.readFileSync(DUMP_PATH, 'utf8'));
+    const tables = ['tenants','roles','permissions','role_permissions','users','user_roles','encryption_keys','collections','collection_members','credentials','credential_versions','credential_collections','connectors','applications','application_credentials','access_policies','access_requests','approvals','launch_grants','sessions','session_events','audit_events','devices','mfa_methods','api_keys','password_rotation_jobs','notifications'];
     for (const table of tables) {
-      const rows = dump[table];
-      if (!rows || !rows.length) continue;
-      for (const r of rows) {
+      for (const r of dump[table] ?? []) {
         try {
           const keys = Object.keys(r);
-          const cols = keys.join(', ');
-          const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-          const values = Object.values(r).map((v) => {
-            if (v && typeof v === 'object' && (v.type === 'Buffer' || Array.isArray(v.data))) {
-              const buf = Buffer.from(v.data ?? v);
-              return '\\x' + buf.toString('hex');
-            }
-            return v;
-          });
-          await memPool.query(`INSERT INTO ${table} (${cols}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`, values);
-        } catch (e) {}
+          const values = Object.values(r).map((v: any) => v && typeof v === 'object' && (v.type === 'Buffer' || Array.isArray(v.data)) ? '\\x' + Buffer.from(v.data ?? v).toString('hex') : v);
+          await memPool.query(`INSERT INTO ${table} (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')}) ON CONFLICT DO NOTHING`, values);
+        } catch {}
       }
     }
-    console.log('[DB] Persistent disk state successfully restored.');
-  } catch (e) {
-    console.warn('[DB] Persistent disk restore error:', e);
-  }
+  } catch (e) { throw new Error(`Unable to restore development state: ${e instanceof Error ? e.message : e}`); }
 }
 
 function wrapClient(client: any) {
@@ -207,11 +124,9 @@ function wrapClient(client: any) {
   const origQuery = client.query.bind(client);
   client.query = async (...args: any[]) => {
     const res = await origQuery(...args);
-    if (typeof args[0] === 'string') {
+    if (!isProduction && typeof args[0] === 'string') {
       const sql = args[0].trim().toUpperCase();
-      if (sql.startsWith('INSERT') || sql.startsWith('UPDATE') || sql.startsWith('DELETE') || sql.startsWith('TRUNCATE') || sql.startsWith('COMMIT')) {
-        scheduleSave();
-      }
+      if (/^(INSERT|UPDATE|DELETE|TRUNCATE|COMMIT)\b/.test(sql)) scheduleSave();
     }
     return res;
   };
@@ -221,59 +136,36 @@ function wrapClient(client: any) {
 
 export const pool: pg.Pool = new Proxy(realPool as any, {
   get(target, prop, receiver) {
-    if (prop === 'connect' || prop === 'query') {
-      return async (...args: any[]) => {
-        if (isUsingFallback) {
-          const fallback = await getMemPool();
-          if (prop === 'query') {
-            const res = await fallback.query(...args);
-            if (typeof args[0] === 'string') {
-              const sql = args[0].trim().toUpperCase();
-              if (sql.startsWith('INSERT') || sql.startsWith('UPDATE') || sql.startsWith('DELETE') || sql.startsWith('TRUNCATE')) {
-                scheduleSave();
-              }
-            }
-            return res;
-          } else {
-            const client = await fallback.connect();
-            return wrapClient(client);
-          }
+    if (prop !== 'connect' && prop !== 'query') return Reflect.get(target, prop, receiver);
+    return async (...args: any[]) => {
+      if (isUsingFallback) {
+        const fallback = await getMemPool();
+        if (prop === 'query') return fallback.query(...args);
+        return wrapClient(await fallback.connect());
+      }
+      try {
+        return prop === 'query' ? await target.query(...args) : await target.connect();
+      } catch (err) {
+        if (isProduction) {
+          throw new Error('PostgreSQL is unavailable in production; no fallback database is permitted');
         }
-        try {
-          return prop === 'query' ? await target.query(...args) : await target.connect();
-        } catch (err) {
-          console.warn('[DB] Live PostgreSQL unavailable — switching to zero-config persistent database');
-          isUsingFallback = true;
-          const fallback = await getMemPool();
-          if (prop === 'query') {
-            const res = await fallback.query(...args);
-            if (typeof args[0] === 'string') {
-              const sql = args[0].trim().toUpperCase();
-              if (sql.startsWith('INSERT') || sql.startsWith('UPDATE') || sql.startsWith('DELETE') || sql.startsWith('TRUNCATE')) {
-                scheduleSave();
-              }
-            }
-            return res;
-          } else {
-            const client = await fallback.connect();
-            return wrapClient(client);
-          }
-        }
-      };
-    }
-    return Reflect.get(target, prop, receiver);
+        console.warn('[DB] PostgreSQL unavailable — enabling development pg-mem fallback');
+        isUsingFallback = true;
+        const fallback = await getMemPool();
+        if (prop === 'query') return fallback.query(...args);
+        return wrapClient(await fallback.connect());
+      }
+    };
   },
 });
 
 export const redis = new (Redis as any)(cfg.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
-redis.on('error', () => {});
+redis.on('error', (err: Error) => { if (isProduction) console.error('[Redis] error:', err.message); });
 
-/** Run `fn` inside a transaction pinned to exactly one tenant. */
 export async function withTenant<T>(tenantId: string, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // set LOCAL: scoped to the transaction, cannot leak across queries
     await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
     const out = await fn(client);
     await client.query('COMMIT');
@@ -281,26 +173,18 @@ export async function withTenant<T>(tenantId: string, fn: (client: pg.PoolClient
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
-  } finally {
-    client.release();
-  }
+  } finally { client.release(); }
 }
 
 export class HttpError extends Error {
-  constructor(public status: number, public code: string, message: string, public auditId?: string) {
-    super(message);
-  }
+  constructor(public status: number, public code: string, message: string, public auditId?: string) { super(message); }
 }
 
-/** Run the SQL migrations in /database/migrations (dev convenience; prod uses CI). */
 export async function migrate() {
+  if (isProduction && isUsingFallback) throw new Error('Cannot migrate production with fallback database');
   const dir = path.resolve(process.cwd(), '../database/migrations');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-  for (const f of files) {
-    const sql = fs.readFileSync(path.join(dir, f), 'utf8');
-    await pool.query(sql);
-    console.log(`migrated ${f}`);
-  }
+  for (const f of files) { await pool.query(fs.readFileSync(path.join(dir, f), 'utf8')); console.log(`migrated ${f}`); }
 }
 
-if (process.argv.includes('--migrate')) migrate().then(() => process.exit(0));
+if (process.argv.includes('--migrate')) migrate().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
