@@ -12,7 +12,8 @@ user cannot know:  the eBay Admin password — no code path returns it.
 ## Repository
 
 ```
-src/                 React + TS console (this demo runs the real engine in-browser)
+src/                 React + TS console
+aPI/                 Real HTTP API client
 backend/             TypeScript/Fastify control plane (auth, vault, grants, audit)
 database/            PostgreSQL migrations — 24 tables, FORCE RLS per tenant
 browser-extension/   Manifest V3 connector — domain-allowlisted isolated-world injection
@@ -25,32 +26,51 @@ tests/               Vitest security suite (engine); backend/tests (API)
 ## Run the console
 
 ```bash
-npm install && npm run dev        # interactive product demo (simulated cloud)
-npm run build                     # static production bundle (dist/)
+npm install
+npm run typecheck
+npm test
+npm run dev
 ```
 
-Hosting on Hostinger (shared = console, VPS = full stack): `docs/HOSTINGER.md`.
+The Vite configuration serves the console on port `3000` and proxies `/api`
+to the Fastify control plane on port `8080` during local development.
 
 ## Run the full stack (local)
 
 ```bash
-bash infrastructure/dev/gen-certs.sh                       # self-signed PKI (dev only)
+bash infrastructure/dev/gen-certs.sh
 export COOKIE_SECRET=$(openssl rand -hex 32)
-cd infrastructure && docker compose up --build             # migrations run at boot
-docker compose exec backend npm run seed                   # demo tenant + sealed vault
-node infrastructure/smoke.mjs                              # 14-step end-to-end gate
+cd infrastructure && docker compose up --build
 ```
+
+Then seed the development tenant if required:
+
+```bash
+docker compose exec backend npm run seed
+```
+
+The controlled browser target is available on port `9000` for acceptance testing.
+It provides a real login form and authenticated dashboard so the Playwright
+launch path can be tested without depending on a third-party site.
 
 ## Test the security model
 
 ```bash
-npx vitest run tests/             # engine: replay/IDOR/reveal/tenant/chain tests
-cd backend && npm i && npm test   # API suite (needs Postgres+Redis, e.g. via compose)
+npm test
+npx vitest run tests/
+cd backend && npm install && npm test
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus backend compile,
-migrate + seed against service containers, `go vet` + connector build, and the
-extension typecheck/bundle.
+CI (`.github/workflows/ci.yml`) runs the console security suite, console build,
+backend compile/migration/seed/API suite against PostgreSQL and Redis service
+containers, connector vet/build, and browser-extension typecheck/bundle.
+
+## Production runtime
+
+The Fastify API and Playwright browser worker require a persistent trusted host.
+Do not deploy the browser-session control plane as a Vercel serverless function.
+Production uses PostgreSQL, Redis, AWS KMS, TLS termination, and a separately
+served Vite frontend. See `DEPLOYMENT.md` and `docs/DEPLOYMENT-DR.md`.
 
 ## The one rule
 
