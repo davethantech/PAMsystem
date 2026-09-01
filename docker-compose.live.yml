@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keyrail
+      POSTGRES_USER: keyrail
+      POSTGRES_PASSWORD: keyrail-local-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - keyrail-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keyrail -d keyrail"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - keyrail-redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      DATABASE_URL: postgres://keyrail:keyrail-local-only@postgres:5432/keyrail
+      REDIS_URL: redis://redis:6379
+      COOKIE_SECRET: ${COOKIE_SECRET:?Set COOKIE_SECRET in .env.live}
+      KMS_PROVIDER: aws
+      KMS_KEY_ID: ${KMS_KEY_ID:?Set KMS_KEY_ID in .env.live}
+      AWS_REGION: ${AWS_REGION:?Set AWS_REGION in .env.live}
+      ISSUER: ${ISSUER:-http://localhost:8080}
+      PG_SSL: "false"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  keyrail-postgres:
+  keyrail-redis:
