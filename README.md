@@ -13,7 +13,7 @@ user cannot know:  the eBay Admin password — no code path returns it.
 
 ```
 src/                 React + TS console
-aPI/                 Real HTTP API client
+src/api/              Real HTTP API client
 backend/             TypeScript/Fastify control plane (auth, vault, grants, audit)
 database/            PostgreSQL migrations — 24 tables, FORCE RLS per tenant
 browser-extension/   Manifest V3 connector — domain-allowlisted isolated-world injection
