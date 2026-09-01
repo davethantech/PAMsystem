@@ -5,4 +5,12 @@ build/
 *.log
 scratch/
 backend/data/*.json
-
+.env
+.env.*
+!.env.example
+!.env.production.example
+!.env.test.example
+!.env.vercel.example
+backend/.env
+backend/.env.*
+!backend/.env.example
