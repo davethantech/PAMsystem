@@ -1,17 +1,17 @@
 # Keyrail Runtime and Deployment
 
-## Supported production architecture
+## Production architecture
 
-Keyrail production runs as a persistent Fastify process with:
+Keyrail production is a persistent Fastify control plane, not a serverless function. The supported architecture is:
 
 - PostgreSQL as the canonical datastore
-- Redis as the session/cache backend
-- AWS KMS for tenant data-encryption keys (`KMS_PROVIDER=aws`)
-- Playwright/Chromium on the same trusted execution host or a dedicated browser-worker host
-- a TLS-terminating reverse proxy / load balancer in front of the API
-- the Vite frontend served separately from the API
+- Redis for sessions, grants and ephemeral state
+- AWS KMS for tenant data-encryption keys
+- Playwright/Chromium on the same trusted execution host or a dedicated persistent browser-worker host
+- TLS reverse proxy/load balancer in front of the API
+- Vite frontend served separately
 
-The API must not run as a Vercel serverless function because browser sessions and the janitor require process lifetime.
+The API must not run as a Vercel serverless function because Playwright browser sessions and the janitor require process lifetime.
 
 ## Required production environment
 
@@ -28,65 +28,161 @@ PG_SSL=true
 PG_SSL_REJECT_UNAUTHORIZED=true
 ```
 
-Never commit these values.
+Never commit real values.
 
-## First production start
+## Deterministic local live-data testing (recommended)
 
-1. Provision PostgreSQL.
-2. Create the Keyrail database and application role.
-3. Run migrations with `npm run migrate` from `backend` using production environment variables.
-4. Start Redis.
-5. Start the API with `npm start` from `backend`.
-6. Serve the frontend with the production build.
-7. Verify `GET /healthz`.
-8. Complete initial setup through the application.
+This is the simplest reliable way to test Keyrail with a real PostgreSQL database, Redis and a visible browser on a Windows development machine.
 
-## Production invariants
+### 1. Start only PostgreSQL and Redis in Docker
 
-- If PostgreSQL is unavailable, the API must fail rather than switching to pg-mem.
-- JSON disk state is development-only.
-- A default cookie secret is invalid in production.
-- Production requires AWS KMS.
-- Secrets are never returned by credential list/read endpoints.
-- Browser launch sessions run in isolated headed Chromium contexts.
+From the repository root:
 
-## Local development
+```powershell
+docker compose -f docker-compose.local.yml up -d
+```
 
-Local development may use the explicit pg-mem fallback when PostgreSQL is unavailable. The fallback is persisted to `backend/data/db_state.json` only for developer convenience.
+Wait until both containers report `healthy`:
 
-For realistic live-data testing, use PostgreSQL and Redis locally instead of the pg-mem fallback.
+```powershell
+docker compose -f docker-compose.local.yml ps
+```
 
-Example:
+### 2. Configure the backend for real PostgreSQL
+
+Create `backend/.env` (do not commit it):
 
 ```env
 NODE_ENV=development
-DATABASE_URL=postgres://keyrail:keyrail@localhost:5432/keyrail
+PORT=8080
+DATABASE_URL=postgres://keyrail:keyrail-local-only@localhost:5432/keyrail
 REDIS_URL=redis://localhost:6379
-COOKIE_SECRET=<random local secret>
+COOKIE_SECRET=<generate-a-random-local-secret>
 ISSUER=http://localhost:8080
 KMS_PROVIDER=local
+SESSION_TTL_MIN=120
+IDLE_TIMEOUT_MIN=15
 ```
 
-Then:
+This development-only local KMS mode is for test data. Production requires AWS KMS.
 
-```bash
+### 3. Install backend dependencies and Chromium
+
+```powershell
 cd backend
-npm install
+npm ci
+npx playwright install chromium
+```
+
+### 4. Run migrations against PostgreSQL
+
+```powershell
 npm run build
 npm run migrate
+```
+
+If migration fails, stop here and fix the migration/database error. Do not switch back to pg-mem to hide it.
+
+### 5. Start the API once
+
+```powershell
 npm start
 ```
 
-Serve the frontend with the Vite dev server or production build and point `VITE_API_URL` at the API base path.
+Expected:
 
-## No-loop startup contract
+```text
+Keyrail API ready
+```
 
-Only one API process should own the configured port. The API has one janitor interval guarded against overlapping executions. Do not start a second backend through both Vercel and a local listener.
+Verify in another terminal:
 
-On shutdown, the server drains Fastify, closes Redis, closes PostgreSQL, and exits once.
+```powershell
+curl http://localhost:8080/healthz
+```
 
-## Live browser testing
+### 6. Start the frontend once
 
-Browser automation requires the API process and Playwright-capable Chromium on the same trusted host/worker. Do not place the browser session manager inside a stateless serverless function.
+From the repository root, in a second terminal:
 
-Use a controlled test application on `http://localhost:9000` before any third-party site. Only after that test passes should live external targets be exercised.
+```powershell
+npm install
+npm run dev
+```
+
+Open the Vite URL shown by the terminal (normally `http://localhost:3000`).
+
+Do not simultaneously start another copy of the backend through Vercel, another terminal, or another IDE task.
+
+### 7. First live-data acceptance test
+
+Use the setup screen to create the first tenant/admin.
+
+Then verify, in order:
+
+1. Create a WEB_PASSWORD credential.
+2. Confirm it appears in Vault.
+3. Refresh the browser.
+4. Confirm it still appears.
+5. Create a Web Application.
+6. Associate the credential.
+7. Refresh again.
+8. Confirm the application remains.
+9. Click Launch.
+10. Confirm a visible Chromium window starts from the Keyrail backend process.
+11. Confirm the target page opens.
+12. Confirm login fields are detected.
+13. Confirm the stored credential is used without returning it through the React API.
+14. Confirm the configured authenticated-state rule becomes true.
+15. Confirm the browser remains open for the user.
+16. Confirm an audit event is recorded.
+
+Use the repository's controlled test target before testing a third-party service.
+
+## Production first start
+
+1. Provision PostgreSQL.
+2. Provision Redis.
+3. Provision an AWS KMS key and grant the API runtime only the required KMS operations.
+4. Configure all production environment variables.
+5. Install backend dependencies.
+6. Install the matching Playwright Chromium runtime on the persistent browser host.
+7. Run `npm run build`.
+8. Run `npm run migrate` once for the release.
+9. Start exactly one API process per configured listener.
+10. Put TLS in front of the API.
+11. Serve the frontend separately.
+12. Verify `/healthz`.
+13. Complete initial setup.
+14. Run the controlled web-login acceptance test.
+15. Only then test approved external applications.
+
+## Production invariants
+
+- PostgreSQL is mandatory in production; pg-mem is never a production fallback.
+- `backend/data/db_state.json` is development-only and is not a production datastore.
+- A default cookie secret is invalid.
+- Production requires AWS KMS.
+- Secrets are never returned by normal credential list/read endpoints.
+- Browser sessions use isolated Playwright contexts.
+- The user's normal Chrome profile is never reused.
+- Browser authentication success requires an explicit success condition; leaving a login URL is not sufficient.
+- CAPTCHA, MFA, passkeys and other human verification challenges are not bypassed.
+
+## No-loop / no-duplicate-process contract
+
+Only one backend process may own port 8080. Only one frontend dev server should own port 3000.
+
+The API owns one guarded janitor interval. It is cleared on shutdown.
+
+Do not run both `npm run dev` and `npm start` for the backend at the same time.
+Do not run a Vercel serverless backend alongside the persistent API.
+
+On SIGTERM/SIGINT the API drains Fastify, closes Redis, closes PostgreSQL and exits once.
+
+## Browser deployment constraint
+
+A headed Playwright browser is visible on the machine where the Playwright process runs. Therefore a cloud API cannot make a headed browser magically appear on the user's local desktop.
+
+For local live testing, run the API and Playwright on the user's machine.
+For remote enterprise deployment, use a persistent browser-worker/remote-desktop architecture rather than a serverless function.
